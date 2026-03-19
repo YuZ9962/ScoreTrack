@@ -1,38 +1,20 @@
 # sporttery_fetcher
 
-本项目是一个本地可运行的中国体彩竞彩足球抓取器（MVP）。
-
-> 当前主数据源：
-> `https://www.sporttery.cn/jc/jsq/zqspf/index.html`
-
----
-
-## 1. 抓取链路
-
-1. API 优先（已确认接口）：
-
-```text
-https://webapi.sporttery.cn/gateway/uniform/football/getMatchCalculatorV1.qry?channel=c&poolCode=hhad,had
-```
-
-2. API 异常时自动回退 HTML / Playwright。
-3. 再失败时回退移动端兜底。
+本项目包含两部分：
+1. **抓取端**：本地抓取中国体彩竞彩足球数据并保存 CSV/JSON。
+2. **前端仪表盘（Streamlit）**：本地查看、筛选、统计每日比赛数据。
 
 ---
 
-## 2. 安装
+## 1. 数据抓取（已有）
 
-```bash
-cd sporttery_fetcher
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-```
+主页面：
+- `https://www.sporttery.cn/jc/jsq/zqspf/index.html`
 
----
+API（优先）：
+- `https://webapi.sporttery.cn/gateway/uniform/football/getMatchCalculatorV1.qry?channel=c&poolCode=hhad,had`
 
-## 3. 运行
+运行抓取：
 
 ```bash
 python -m src.main --date 2026-03-19
@@ -44,72 +26,97 @@ python -m src.main --date 2026-03-19
 
 ---
 
-## 4. 已确认字段映射（getMatchCalculatorV1）
+## 2. 前端仪表盘（新增）
 
-- `match_no = matchNumStr`
-- `issue_date = businessDate`
-- `league = leagueAllName > leagueAbbName`
-- `home_team = homeTeamAllName > homeTeamAbbName`
-- `away_team = awayTeamAllName > awayTeamAbbName`
-- `kickoff_time = matchDate + " " + matchTime[:5]`（缺时间时保留 matchDate）
-- `raw_id = matchId`
-- `source_url = https://www.sporttery.cn/jc/jsq/zqspf/index.html`
+### 2.1 页面说明
 
-让球：
-- `handicap = hhad.goalLine`
-- 若为空，回退 `hhad.goalLineValue`
-- 再回退 `oddsList(poolCode=HHAD).goalLine`
+- **Dashboard（首页）**
+  - 总比赛数
+  - handicap 非空场次
+  - 开售场次
+  - 联赛分布
+  - 最早/最晚开赛时间
+  - 最近抓取时间
 
-胜平负奖金：
-- `spf_win = had.h`
-- `spf_draw = had.d`
-- `spf_lose = had.a`
-- had 缺失时回退 `oddsList(poolCode=HAD)`
+- **Matches（比赛列表）**
+  - 表格展示比赛
+  - 支持筛选：日期、联赛、关键词、handicap 非空、开售
+  - 支持排序：开赛时间/联赛/场次编号
+  - 可选中单场并展示详情卡片
 
-让球胜平负奖金：
-- `rqspf_win = hhad.h`
-- `rqspf_draw = hhad.d`
-- `rqspf_lose = hhad.a`
-- hhad 缺失时回退 `oddsList(poolCode=HHAD)`
+- **Match Detail（比赛详情）**
+  - 基础信息卡片
+  - 胜平负奖金卡片
+  - 让球胜平负奖金卡片
+  - 原始抓取信息（source_url/raw_id/scrape_time）
 
-开售状态：
-- `matchStatus == "Selling"` 或 `sellStatus == 2` -> `sell_status = "开售"`
-- 否则保留原始 `matchStatus/sellStatus`
+- **Analytics（统计分析）**
+  - 每日比赛数趋势
+  - 联赛比赛数柱状图
+  - handicap 分布柱状图
+  - 胜平负与让球胜平负赔率统计摘要
 
----
-
-## 5. 接口检测（排查优先）
+### 2.2 运行方式
 
 ```bash
-python -m src.fetchers.interface_detector
-# 或指定 URL
-python -m src.fetchers.interface_detector --url https://www.sporttery.cn/jc/jsq/zqspf/index.html
+streamlit run app/app.py
 ```
 
-输出文件：
-- `data/raw/detected_xhr.json`
+启动后浏览器会打开本地地址（默认 `http://localhost:8501`）。
 
 ---
 
-## 6. 自检
+## 3. 安装
 
 ```bash
-python tests/self_check.py --date 2026-03-19
+cd sporttery_fetcher
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
 ```
-
-自检检查：
-1. 主页面可访问
-2. 至少抓到 1 场
-3. 至少 1 场 `handicap` 非空
-4. 至少 1 场 `spf_win` 非空
-5. 至少 1 场 `rqspf_win` 非空
-6. detector 输出文件存在
 
 ---
 
-## 7. 常见排查
+## 4. 前端数据来源规则
 
-1. 查看 `logs/app.log`
-2. 先跑 `python -m src.fetchers.interface_detector`
-3. 若 Playwright 报错，执行 `playwright install chromium`
-4. 检查 `data/raw/snapshots/` 中 HTML 快照
+- 直接读取：`data/processed/*_matches.csv`
+- 默认选择最新日期文件
+- 支持用户切换日期文件
+- 无文件或空数据时给出友好提示
+
+---
+
+## 5. 字段（CSV）
+
+前端默认使用这些字段：
+
+- issue_date
+- match_no
+- league
+- home_team
+- away_team
+- kickoff_time
+- handicap
+- sell_status
+- spf_win
+- spf_draw
+- spf_lose
+- rqspf_win
+- rqspf_draw
+- rqspf_lose
+- source_url
+- scrape_time
+- raw_id
+
+---
+
+## 6. 常见问题
+
+1. **没有数据文件**
+   - 先执行抓取命令：`python -m src.main --date 2026-03-19`
+2. **Streamlit 启动失败**
+   - 确认依赖已安装：`pip install -r requirements.txt`
+3. **接口变化导致数据异常**
+   - 先跑：`python -m src.fetchers.interface_detector`
+   - 查看：`logs/app.log` 与 `data/raw/snapshots/`
