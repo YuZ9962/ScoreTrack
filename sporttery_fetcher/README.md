@@ -92,7 +92,8 @@ python -m src.main --date 2026-03-19
 1. **API 抓取器** `src/fetchers/api_fetcher.py`
    - 不再默认尝试已失效旧接口。
    - 如需启用 API，可通过 `SPORTTERY_API_ENDPOINTS` 注入（逗号分隔）。
-   - 未配置接口时会自动跳过并回退 HTML。
+   - 未配置该环境变量时，会尝试读取 `data/raw/detected_xhr.json` 自动加载候选接口。
+   - 若仍无可用接口，会自动跳过并回退 HTML。
 
 2. **HTML 抓取器** `src/fetchers/html_fetcher.py`
    - requests + BeautifulSoup 解析官方新页面：

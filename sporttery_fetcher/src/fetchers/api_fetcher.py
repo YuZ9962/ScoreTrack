@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from config.settings import settings
 from src.utils.http import HTTPClient
 from src.utils.logger import get_logger
 
@@ -15,9 +18,36 @@ class APIFetcher:
 
     def __init__(self, http_client: HTTPClient | None = None) -> None:
         self.http = http_client or HTTPClient()
-        # 默认不再内置已失效旧接口；从环境变量注入（逗号分隔）以便 interface_detector 后快速验证。
+        self.candidate_endpoints = self._load_candidate_endpoints()
+
+    def _load_candidate_endpoints(self) -> list[str]:
+        # 优先环境变量（手动确认过最可靠）
         raw = os.getenv("SPORTTERY_API_ENDPOINTS", "")
-        self.candidate_endpoints = [u.strip() for u in raw.split(",") if u.strip()]
+        env_urls = [u.strip() for u in raw.split(",") if u.strip()]
+        if env_urls:
+            return env_urls
+
+        # 次选 interface_detector 输出，自动筛出 sporttery JSON/XHR URL
+        detector_file = settings.data_raw_dir / "detected_xhr.json"
+        if detector_file.exists():
+            try:
+                payload = json.loads(detector_file.read_text(encoding="utf-8"))
+                urls: list[str] = []
+                for item in payload:
+                    url = str(item.get("url", ""))
+                    if "sporttery" not in url:
+                        continue
+                    if any(x in url.lower() for x in [".js", ".css", ".png", ".jpg", ".gif"]):
+                        continue
+                    if url not in urls:
+                        urls.append(url)
+                if urls:
+                    logger.info("从 detected_xhr.json 加载到 %s 条 API 候选", len(urls))
+                    return urls
+            except Exception as exc:
+                logger.warning("读取 detected_xhr.json 失败: %s", exc)
+
+        return []
 
     def fetch(self, issue_date: str) -> tuple[list[dict[str, Any]], str | None]:
         if not self.candidate_endpoints:
