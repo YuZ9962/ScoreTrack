@@ -17,6 +17,11 @@ from src.utils.save import save_csv, save_json
 logger = get_logger(__name__)
 
 
+def _triple_non_empty_count(records: list[dict[str, Any]], keys: tuple[str, str, str]) -> int:
+    a, b, c = keys
+    return sum(1 for r in records if r.get(a) not in (None, "") and r.get(b) not in (None, "") and r.get(c) not in (None, ""))
+
+
 def run(issue_date: str) -> dict[str, Any]:
     logger.info("开始抓取竞彩足球数据，日期=%s", issue_date)
     logger.info("当前主页面: %s", settings.primary_page_url)
@@ -53,11 +58,20 @@ def run(issue_date: str) -> dict[str, Any]:
 
     normalized = normalize_matches(raw_records, issue_date=issue_date, source_url=source_url or "")
     handicap_non_empty = sum(1 for r in normalized if r.get("handicap") not in (None, ""))
+    spf_full_non_empty = _triple_non_empty_count(normalized, ("spf_win", "spf_draw", "spf_lose"))
+    rqspf_full_non_empty = _triple_non_empty_count(normalized, ("rqspf_win", "rqspf_draw", "rqspf_lose"))
 
     json_path = save_json(normalized, issue_date)
     csv_path = save_csv(normalized, issue_date)
 
-    logger.info("抓取完成：strategy=%s, 总场次=%s, handicap非空=%s", strategy, len(normalized), handicap_non_empty)
+    logger.info(
+        "抓取完成：strategy=%s, 总场次=%s, handicap非空=%s, spf三列非空=%s, rqspf三列非空=%s",
+        strategy,
+        len(normalized),
+        handicap_non_empty,
+        spf_full_non_empty,
+        rqspf_full_non_empty,
+    )
     logger.info("JSON 输出: %s", json_path)
     logger.info("CSV 输出: %s", csv_path)
 
@@ -65,6 +79,8 @@ def run(issue_date: str) -> dict[str, Any]:
         "count": len(normalized),
         "strategy": strategy,
         "handicap_non_empty": handicap_non_empty,
+        "spf_full_non_empty": spf_full_non_empty,
+        "rqspf_full_non_empty": rqspf_full_non_empty,
         "json_path": str(json_path),
         "csv_path": str(csv_path),
         "source_url": source_url,
@@ -91,6 +107,8 @@ def main() -> None:
         print(
             f"抓取成功: 条数={result['count']} | 策略={result['strategy']} | "
             f"handicap非空={result['handicap_non_empty']} | "
+            f"spf三列非空={result['spf_full_non_empty']} | "
+            f"rqspf三列非空={result['rqspf_full_non_empty']} | "
             f"JSON={result['json_path']} | CSV={result['csv_path']}"
         )
     except Exception as exc:

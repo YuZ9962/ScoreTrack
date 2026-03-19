@@ -24,7 +24,7 @@ def check_main_page() -> bool:
     return ok
 
 
-def check_fetch(issue_date: str) -> tuple[bool, int, int]:
+def check_fetch(issue_date: str) -> tuple[bool, int, int, int, int]:
     api = APIFetcher()
     html = HTMLFetcher()
 
@@ -36,15 +36,18 @@ def check_fetch(issue_date: str) -> tuple[bool, int, int]:
 
     count = len(records)
     handicap_non_empty = sum(1 for r in records if r.get("handicap") not in (None, ""))
-    ok = count >= 1 and handicap_non_empty >= 1
+    spf_win_non_empty = sum(1 for r in records if r.get("spf_win") not in (None, ""))
+    rqspf_win_non_empty = sum(1 for r in records if r.get("rqspf_win") not in (None, ""))
+
+    ok = count >= 1 and handicap_non_empty >= 1 and spf_win_non_empty >= 1 and rqspf_win_non_empty >= 1
 
     print(
-        f"[B] 抓取检查: strategy={strategy} | count={count} | "
-        f"handicap_non_empty={handicap_non_empty} | ok={ok} | source={endpoint}"
+        f"[B] 抓取检查: strategy={strategy} | count={count} | handicap_non_empty={handicap_non_empty} | "
+        f"spf_win_non_empty={spf_win_non_empty} | rqspf_win_non_empty={rqspf_win_non_empty} | ok={ok} | source={endpoint}"
     )
     if records:
         print(f"    样例: {json.dumps(records[0], ensure_ascii=False)[:350]}")
-    return ok, count, handicap_non_empty
+    return ok, count, handicap_non_empty, spf_win_non_empty, rqspf_win_non_empty
 
 
 def check_detector() -> bool:
@@ -69,14 +72,16 @@ def main() -> None:
 
     print("开始自检...\n")
     a_ok = check_main_page()
-    b_ok, count, handicap_count = check_fetch(args.date)
+    b_ok, count, handicap_count, spf_win_count, rqspf_win_count = check_fetch(args.date)
     c_ok = check_detector()
 
     print("\n自检汇总:")
     print(f"- A 主页面可访问: {a_ok}")
     print(f"- B 至少抓到1场: {count >= 1}")
-    print(f"- C handicap至少部分非空: {handicap_count >= 1}")
-    print(f"- D detector 输出文件存在: {c_ok}")
+    print(f"- C handicap至少1场非空: {handicap_count >= 1}")
+    print(f"- D spf_win至少1场非空: {spf_win_count >= 1}")
+    print(f"- E rqspf_win至少1场非空: {rqspf_win_count >= 1}")
+    print(f"- F detector 输出文件存在: {c_ok}")
     print(f"- Overall: {a_ok and b_ok and c_ok}")
 
 
