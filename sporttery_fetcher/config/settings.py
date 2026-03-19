@@ -30,18 +30,23 @@ class Settings:
     save_html_snapshot: bool = os.getenv("SAVE_HTML_SNAPSHOT", "true").lower() == "true"
     playwright_headless: bool = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
 
-    # 已确认可用的竞彩足球接口
-    football_api_url: str = os.getenv(
-        "FOOTBALL_API_URL",
-        "https://webapi.sporttery.cn/gateway/uniform/football/getMatchListV1.qry?clientCode=3001",
+    # 新主数据源：官方竞彩足球计算器
+    primary_page_url: str = os.getenv(
+        "PRIMARY_PAGE_URL",
+        "https://www.sporttery.cn/jc/jsq/zqspf/index.html",
     )
 
-    # 2026-03 已切换到 zqszsc（竞彩足球赛事总赛程）
+    # 可选 API（来自 detector 或手工配置，逗号分隔）
+    api_candidate_urls: tuple[str, ...] = tuple(
+        i.strip() for i in os.getenv("API_CANDIDATE_URLS", "").split(",") if i.strip()
+    )
+
+    # 旧赛程页保留为 fallback/扩展
     schedule_urls: tuple[str, ...] = (
+        primary_page_url,
         "https://www.sporttery.cn/jc/zqszsc/",
         "https://www.sporttery.cn/jc/zqszsc/index.shtml",
     )
-    # 后续赛果扩展入口
     result_urls: tuple[str, ...] = (
         "https://www.sporttery.cn/jc/zqsgkj/",
         "https://www.sporttery.cn/jc/zqsgkj/index.shtml",

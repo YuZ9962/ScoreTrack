@@ -6,6 +6,7 @@ from typing import Any
 
 from dateutil.parser import parse as parse_date
 
+from config.settings import settings
 from src.fetchers.api_fetcher import APIFetcher
 from src.fetchers.html_fetcher import HTMLFetcher
 from src.fetchers.mobile_fetcher import MobileFetcher
@@ -17,7 +18,8 @@ logger = get_logger(__name__)
 
 
 def run(issue_date: str) -> dict[str, Any]:
-    logger.info("开始抓取竞彩足球赛程，日期=%s", issue_date)
+    logger.info("开始抓取竞彩足球数据，日期=%s", issue_date)
+    logger.info("当前主页面: %s", settings.primary_page_url)
 
     raw_records: list[dict[str, Any]] = []
     source_url: str | None = None
@@ -33,7 +35,7 @@ def run(issue_date: str) -> dict[str, Any]:
     if not raw_records:
         logger.info("API 无可用数据，回退到 HTML 抓取")
         raw_records, source_url = html_fetcher.fetch(issue_date)
-        strategy = "html"
+        strategy = "html/playwright"
 
     if not raw_records:
         logger.info("HTML 无可用数据，回退移动端抓取")
@@ -42,26 +44,27 @@ def run(issue_date: str) -> dict[str, Any]:
 
     if not raw_records:
         detail = (
-            "抓取失败：未获取到有效竞彩足球赛程数据。\n"
-            "- 旧 URL /jc/zqss/ 相关页面/接口已失效，请勿再使用。\n"
-            "- 当前应使用新入口：https://www.sporttery.cn/jc/zqszsc/\n"
-            "- 请先运行：python -m src.fetchers.interface_detector 检查当前页面 XHR。\n"
-            "- 若需要 Playwright 回退，请先执行：playwright install chromium"
+            "抓取失败：未获取到有效竞彩足球数据。\n"
+            "请优先运行：python -m src.fetchers.interface_detector\n"
+            "并确认主页面是否可访问：https://www.sporttery.cn/jc/jsq/zqspf/index.html\n"
+            "如需动态解析，请先执行：playwright install chromium"
         )
         raise RuntimeError(detail)
 
     normalized = normalize_matches(raw_records, issue_date=issue_date, source_url=source_url or "")
+    handicap_non_empty = sum(1 for r in normalized if r.get("handicap") not in (None, ""))
 
     json_path = save_json(normalized, issue_date)
     csv_path = save_csv(normalized, issue_date)
 
-    logger.info("抓取完成，策略=%s，条数=%s", strategy, len(normalized))
+    logger.info("抓取完成：strategy=%s, 总场次=%s, handicap非空=%s", strategy, len(normalized), handicap_non_empty)
     logger.info("JSON 输出: %s", json_path)
     logger.info("CSV 输出: %s", csv_path)
 
     return {
         "count": len(normalized),
         "strategy": strategy,
+        "handicap_non_empty": handicap_non_empty,
         "json_path": str(json_path),
         "csv_path": str(csv_path),
         "source_url": source_url,
@@ -87,6 +90,7 @@ def main() -> None:
         result = run(issue_date)
         print(
             f"抓取成功: 条数={result['count']} | 策略={result['strategy']} | "
+            f"handicap非空={result['handicap_non_empty']} | "
             f"JSON={result['json_path']} | CSV={result['csv_path']}"
         )
     except Exception as exc:

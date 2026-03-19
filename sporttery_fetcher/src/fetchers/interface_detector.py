@@ -74,7 +74,7 @@ def manual_instructions() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="检测官方赛程页 XHR/JSON 接口")
-    parser.add_argument("--url", default=settings.schedule_urls[0], help="待检测页面 URL")
+    parser.add_argument("--url", default=settings.primary_page_url, help="待检测页面 URL")
     args = parser.parse_args()
 
     detector = InterfaceDetector()

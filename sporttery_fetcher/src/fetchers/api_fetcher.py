@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -11,94 +12,153 @@ logger = get_logger(__name__)
 
 
 class APIFetcher:
-    """基于已确认官方接口抓取竞彩足球赛程。"""
+    """优先尝试从主页面关联的 JSON/XHR 接口抓取数据。"""
 
     def __init__(self, http_client: HTTPClient | None = None) -> None:
         self.http = http_client or HTTPClient()
-        self.endpoint = settings.football_api_url
+        self.source_page = settings.primary_page_url
 
     def fetch(self, issue_date: str) -> tuple[list[dict[str, Any]], str | None]:
-        try:
-            response = self.http.request("GET", self.endpoint)
-            data = response.json()
-        except Exception as exc:
-            logger.warning("API 抓取失败: %s", exc)
+        endpoints = self._load_candidate_endpoints()
+        if not endpoints:
+            logger.info("API 抓取跳过：未发现可用候选接口（可先运行 interface_detector）")
             return [], None
 
-        if not isinstance(data, dict):
-            logger.warning("API 响应不是 JSON 对象")
-            return [], None
+        for endpoint in endpoints:
+            try:
+                response = self.http.request("GET", endpoint)
+                payload = response.json()
+                records = self._extract_matches(payload, issue_date)
+                if records:
+                    logger.info("API 抓取成功: endpoint=%s, 条数=%s", endpoint, len(records))
+                    return records, endpoint
+                logger.info("API 返回成功但无匹配数据: %s", endpoint)
+            except Exception as exc:
+                logger.warning("API 抓取失败: %s, 原因: %s", endpoint, exc)
+        return [], None
 
-        if data.get("success") is not True:
-            logger.warning("API success!=true, errorCode=%s", data.get("errorCode"))
-            return [], None
+    def _load_candidate_endpoints(self) -> list[str]:
+        # 1) 环境变量
+        if settings.api_candidate_urls:
+            return list(settings.api_candidate_urls)
 
-        matches = self._extract_matches(data, issue_date)
-        logger.info("API 抓取完成: endpoint=%s, issue_date=%s, 条数=%s", self.endpoint, issue_date, len(matches))
-        return matches, self.endpoint
+        # 2) interface_detector 产物
+        detector_file = settings.data_raw_dir / "detected_xhr.json"
+        if detector_file.exists():
+            try:
+                data = json.loads(detector_file.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("读取 detected_xhr.json 失败: %s", exc)
+                return []
 
-    def _extract_matches(self, payload: dict[str, Any], issue_date: str) -> list[dict[str, Any]]:
-        value = payload.get("value") or {}
-        match_info_list = value.get("matchInfoList") or []
+            urls: list[str] = []
+            for item in data:
+                url = str(item.get("url", "")).strip()
+                if not url:
+                    continue
+                if "sporttery" not in url and "webapi.sporttery.cn" not in url:
+                    continue
+                if any(x in url.lower() for x in [".js", ".css", ".png", ".jpg", ".gif", ".svg"]):
+                    continue
+                if url not in urls:
+                    urls.append(url)
+            return urls
 
-        records: list[dict[str, Any]] = []
-        for bucket in match_info_list:
-            if not isinstance(bucket, dict):
+        return []
+
+    def _extract_matches(self, payload: Any, issue_date: str) -> list[dict[str, Any]]:
+        candidates = self._find_match_items(payload)
+        out: list[dict[str, Any]] = []
+
+        for item in candidates:
+            issue = self._pick(item, "businessDate", "issueDate", "date")
+            match_date = self._pick(item, "matchDate", "matchTime", "startTime")
+            match_day = str(match_date)[:10] if match_date else None
+            effective_issue = issue or match_day
+
+            if issue_date and effective_issue and str(effective_issue) != issue_date:
                 continue
-            business_date = str(bucket.get("businessDate") or "").strip() or None
-            sub_list = bucket.get("subMatchList") or []
-            for item in sub_list:
-                if not isinstance(item, dict):
-                    continue
 
-                # 按 issue_date 过滤：优先 businessDate；缺失时回退 matchDate 前 10 位
-                match_date = self._safe_str(item.get("matchDate"))
-                match_day = match_date[:10] if match_date else None
-                effective_date = business_date or match_day
-                if issue_date and effective_date and effective_date != issue_date:
-                    continue
+            handicap = self._extract_handicap(item)
+            record = {
+                "issue_date": effective_issue or issue_date,
+                "match_no": self._pick(item, "lineNum", "matchNo", "matchNumStr"),
+                "league": self._pick(item, "leagueAllName", "leagueAbbName", "leagueName"),
+                "home_team": self._pick(item, "homeTeamAllName", "homeTeamAbbName", "homeTeamName"),
+                "away_team": self._pick(item, "awayTeamAllName", "awayTeamAbbName", "awayTeamName"),
+                "kickoff_time": self._build_kickoff(item),
+                "handicap": handicap,
+                "sell_status": self._pick(item, "sellStatus", "status", "isSale"),
+                "spf_win": self._pick(item, "win", "h", "spfWin", "winOdds"),
+                "spf_draw": self._pick(item, "draw", "d", "spfDraw", "drawOdds"),
+                "spf_lose": self._pick(item, "lose", "a", "spfLose", "loseOdds"),
+                "rqspf_win": self._pick(item, "rqWin", "rqspfWin"),
+                "rqspf_draw": self._pick(item, "rqDraw", "rqspfDraw"),
+                "rqspf_lose": self._pick(item, "rqLose", "rqspfLose"),
+                "play_spf": None,
+                "play_rqspf": None,
+                "play_score": None,
+                "play_goals": None,
+                "play_half_full": None,
+                "source_url": self.source_page,
+                "scrape_time": datetime.now().isoformat(timespec="seconds"),
+                "raw_id": self._pick(item, "matchId", "id", "mid"),
+            }
 
-                kickoff_time = self._build_kickoff_time(item)
-                records.append(
-                    {
-                        "issue_date": effective_date or issue_date,
-                        "match_no": item.get("lineNum"),
-                        "league": item.get("leagueAllName") or item.get("leagueAbbName"),
-                        "home_team": item.get("homeTeamAllName") or item.get("homeTeamAbbName"),
-                        "away_team": item.get("awayTeamAllName") or item.get("awayTeamAbbName"),
-                        "kickoff_time": kickoff_time,
-                        "handicap": None,
-                        "sell_status": None,
-                        "play_spf": None,
-                        "play_rqspf": None,
-                        "play_score": None,
-                        "play_goals": None,
-                        "play_half_full": None,
-                        "source_url": "https://www.sporttery.cn/jc/zqszsc/",
-                        "scrape_time": datetime.now().isoformat(timespec="seconds"),
-                        "raw_id": item.get("matchId"),
-                    }
+            if record["home_team"] and record["away_team"]:
+                out.append(record)
+
+        return out
+
+    def _find_match_items(self, payload: Any) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+
+        def walk(node: Any, parent_issue: str | None = None) -> None:
+            if isinstance(node, dict):
+                issue = self._pick(node, "businessDate", "issueDate", "date") or parent_issue
+                keys = {str(k).lower() for k in node.keys()}
+                looks_like_match = bool(
+                    {"hometeamallname", "awayteamallname", "hometeamabbname", "awayteamabbname", "matchid"} & keys
                 )
+                if looks_like_match:
+                    if issue and "businessDate" not in node:
+                        node = {**node, "businessDate": issue}
+                    out.append(node)
 
-        return records
+                for v in node.values():
+                    walk(v, issue)
+            elif isinstance(node, list):
+                for i in node:
+                    walk(i, parent_issue)
+
+        walk(payload)
+        return out
 
     @staticmethod
-    def _safe_str(value: Any) -> str | None:
-        if value in (None, ""):
+    def _pick(raw: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            for k, v in raw.items():
+                if str(k).lower() == key.lower() and v not in ("", None):
+                    return v
+        return None
+
+    def _build_kickoff(self, raw: dict[str, Any]) -> str | None:
+        match_date = self._pick(raw, "matchDate")
+        if match_date:
+            return str(match_date)
+
+        date_part = self._pick(raw, "businessDate", "issueDate")
+        time_part = self._pick(raw, "matchTime", "startTime")
+        if date_part and time_part:
+            return f"{date_part} {time_part}"
+        return str(date_part) if date_part else None
+
+    def _extract_handicap(self, raw: dict[str, Any]) -> str | None:
+        # 仅从明确字段抓让球，避免把赔率误识别为让球
+        val = self._pick(raw, "handicap", "letBall", "concede", "rq", "rqNum")
+        if val in (None, ""):
             return None
-        return str(value).strip()
-
-    def _build_kickoff_time(self, match: dict[str, Any]) -> str | None:
-        match_date = self._safe_str(match.get("matchDate"))
-        if match_date and len(match_date) >= 16:
-            return match_date
-
-        for key in ["matchTime", "saleEndTime", "startTime", "startSaleTime"]:
-            time_val = self._safe_str(match.get(key))
-            if not time_val:
-                continue
-            if match_date and len(match_date) >= 10 and len(time_val) <= 8 and ":" in time_val:
-                return f"{match_date[:10]} {time_val}"
-            return time_val
-
-        return match_date
+        text = str(val).strip()
+        if text.lstrip("+-").replace(".", "", 1).isdigit():
+            return text
+        return None
