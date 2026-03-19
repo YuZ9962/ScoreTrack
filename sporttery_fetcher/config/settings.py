@@ -30,6 +30,12 @@ class Settings:
     save_html_snapshot: bool = os.getenv("SAVE_HTML_SNAPSHOT", "true").lower() == "true"
     playwright_headless: bool = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
 
+    # 已确认可用的竞彩足球接口
+    football_api_url: str = os.getenv(
+        "FOOTBALL_API_URL",
+        "https://webapi.sporttery.cn/gateway/uniform/football/getMatchListV1.qry?clientCode=3001",
+    )
+
     # 2026-03 已切换到 zqszsc（竞彩足球赛事总赛程）
     schedule_urls: tuple[str, ...] = (
         "https://www.sporttery.cn/jc/zqszsc/",

@@ -1,7 +1,7 @@
 # sporttery_fetcher
 
 本项目是一个**本地可运行的中国体彩竞彩足球比赛信息抓取器（第一阶段 MVP）**。  
-目标：先稳定抓取每日比赛信息并落地到本地 JSON / CSV。
+目标：稳定抓取每日比赛信息并落地到本地 JSON / CSV。
 
 > 当前只做竞彩足球抓取，不含预测逻辑、不接大模型 API、不做前端可视化。
 
@@ -62,15 +62,27 @@ playwright install chromium
 
 ---
 
-## 3. 快速开始
+## 3. 当前已确认可用的竞彩足球接口
 
-### 3.1 抓取当天
+已确认可用接口（API 主链路）：
+
+```text
+GET https://webapi.sporttery.cn/gateway/uniform/football/getMatchListV1.qry?clientCode=3001
+```
+
+程序默认优先请求该接口。若接口异常，自动回退 HTML -> 移动端。
+
+---
+
+## 4. 快速开始
+
+### 4.1 抓取当天
 
 ```bash
 python -m src.main
 ```
 
-### 3.2 抓取指定日期
+### 4.2 抓取指定日期
 
 ```bash
 python -m src.main --date 2026-03-19
@@ -87,16 +99,15 @@ python -m src.main --date 2026-03-19
 
 ---
 
-## 4. 抓取策略（两层 + 回退）
+## 5. 抓取策略（API 优先 + 回退）
 
 1. **API 抓取器** `src/fetchers/api_fetcher.py`
-   - 不再默认尝试已失效旧接口。
-   - 如需启用 API，可通过 `SPORTTERY_API_ENDPOINTS` 注入（逗号分隔）。
-   - 未配置该环境变量时，会尝试读取 `data/raw/detected_xhr.json` 自动加载候选接口。
-   - 若仍无可用接口，会自动跳过并回退 HTML。
+   - 固定使用 `getMatchListV1.qry?clientCode=3001`。
+   - 解析 `value.matchInfoList[*].subMatchList[*]`。
+   - 按 `businessDate == --date` 过滤（无 businessDate 时回退 matchDate）。
 
 2. **HTML 抓取器** `src/fetchers/html_fetcher.py`
-   - requests + BeautifulSoup 解析官方新页面：
+   - requests + BeautifulSoup 解析官方页面：
      - `https://www.sporttery.cn/jc/zqszsc/`
    - 如页面动态渲染导致静态 HTML 无数据，自动回退 Playwright。
 
@@ -105,7 +116,7 @@ python -m src.main --date 2026-03-19
 
 ---
 
-## 5. 官方页面接口检测（XHR/JSON）
+## 6. 官方页面接口检测（XHR/JSON）
 
 运行自动检测脚本：
 
@@ -115,19 +126,14 @@ python -m src.fetchers.interface_detector
 python -m src.fetchers.interface_detector --url https://www.sporttery.cn/jc/zqszsc/
 ```
 
-脚本会：
-- 监听页面加载时的 XHR/Fetch
-- 提取 URL / Method / PostData / 响应片段
-- 保存到 `data/raw/detected_xhr.json`
-
-如果自动检测失败，会打印手动排查说明（F12 Network -> XHR/Fetch）。
+输出文件：
+- `data/raw/detected_xhr.json`
 
 ---
 
-## 6. 字段标准化
+## 7. 标准化字段
 
-无论 API 还是 HTML，统一输出以下字段：
-
+统一输出：
 - issue_date
 - match_no
 - league
@@ -146,43 +152,25 @@ python -m src.fetchers.interface_detector --url https://www.sporttery.cn/jc/zqsz
 - raw_id
 
 说明：
-- 暂时抓不到的字段会保留为 `null`，不会导致程序崩溃。
-- 解析规则集中在 `src/parsers/normalize.py`，便于后续扩展。
+- 暂时抓不到的字段保留 `null`，不崩溃。
+- API 映射规则：
+  - `issue_date <- businessDate`（缺失时回退 matchDate）
+  - `match_no <- lineNum`
+  - `league <- leagueAllName > leagueAbbName`
+  - `home_team <- homeTeamAllName > homeTeamAbbName`
+  - `away_team <- awayTeamAllName > awayTeamAbbName`
+  - `raw_id <- matchId`
+  - `source_url <- https://www.sporttery.cn/jc/zqszsc/`
 
 ---
 
-## 7. 日志与容错
+## 8. 修复后验证步骤（推荐）
 
-- 控制台 + `logs/app.log` 双日志
-- 请求超时重试（tenacity）
-- 自定义 User-Agent
-- 自动编码处理
-- API 失败自动回退 HTML
-- 可选 HTML 快照保存（用于页面结构漂移调试）
-
-HTML 快照默认开启，路径：
-- `data/raw/snapshots/*.html`
-
-可通过 `.env` 关闭：
-
-```env
-SAVE_HTML_SNAPSHOT=false
-```
-
----
-
-## 8. 修复后验证步骤（推荐先跑）
-
-### 8.1 一键自检（页面访问 / HTML 解析 / detector 输出）
+### 8.1 一键自检（主页面 + API + HTML + detector）
 
 ```bash
 python tests/self_check.py --date 2026-03-19
 ```
-
-该脚本会验证：
-1) 主页面 `https://www.sporttery.cn/jc/zqszsc/` 是否可访问。  
-2) HTML 抓取是否至少提取 1 场比赛。  
-3) `interface_detector` 是否成功输出 `data/raw/detected_xhr.json`（若本机未安装 Playwright，会给出安装提示，不影响前两项）。
 
 ### 8.2 主程序验证
 
@@ -199,10 +187,19 @@ ls -lh data/processed/2026-03-19_matches.csv
 
 ---
 
-## 9. 后续扩展建议（下一阶段）
+## 9. 日志与容错
+
+- 控制台 + `logs/app.log` 双日志
+- 请求超时重试（tenacity）
+- 自定义 User-Agent
+- 自动编码处理
+- API 失败自动回退 HTML
+- 可选 HTML 快照保存（用于页面结构漂移调试）
+
+---
+
+## 10. 下一阶段建议
 
 1. 基于 `https://www.sporttery.cn/jc/zqsgkj/` 新增赛果抓取器。  
-2. 增加“赛事公告页”结构化解析（停售、延期、取消）。  
-3. 将 `detected_xhr.json` 的结果自动转成 API 配置，提高可维护性。  
-4. 引入数据库持久化（如 SQLite / Postgres）并加去重策略。  
-5. 增加字段质量检查（空值率、字段漂移告警）。
+2. 增加赛事公告页结构化解析。  
+3. 将赛程抓取结果写入数据库并做去重与增量。  

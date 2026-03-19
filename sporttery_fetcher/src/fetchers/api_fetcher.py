@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
-import os
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from config.settings import settings
@@ -14,114 +11,94 @@ logger = get_logger(__name__)
 
 
 class APIFetcher:
-    """优先尝试站内 API/XHR 的抓取器。"""
+    """基于已确认官方接口抓取竞彩足球赛程。"""
 
     def __init__(self, http_client: HTTPClient | None = None) -> None:
         self.http = http_client or HTTPClient()
-        self.candidate_endpoints = self._load_candidate_endpoints()
-
-    def _load_candidate_endpoints(self) -> list[str]:
-        # 优先环境变量（手动确认过最可靠）
-        raw = os.getenv("SPORTTERY_API_ENDPOINTS", "")
-        env_urls = [u.strip() for u in raw.split(",") if u.strip()]
-        if env_urls:
-            return env_urls
-
-        # 次选 interface_detector 输出，自动筛出 sporttery JSON/XHR URL
-        detector_file = settings.data_raw_dir / "detected_xhr.json"
-        if detector_file.exists():
-            try:
-                payload = json.loads(detector_file.read_text(encoding="utf-8"))
-                urls: list[str] = []
-                for item in payload:
-                    url = str(item.get("url", ""))
-                    if "sporttery" not in url:
-                        continue
-                    if any(x in url.lower() for x in [".js", ".css", ".png", ".jpg", ".gif"]):
-                        continue
-                    if url not in urls:
-                        urls.append(url)
-                if urls:
-                    logger.info("从 detected_xhr.json 加载到 %s 条 API 候选", len(urls))
-                    return urls
-            except Exception as exc:
-                logger.warning("读取 detected_xhr.json 失败: %s", exc)
-
-        return []
+        self.endpoint = settings.football_api_url
 
     def fetch(self, issue_date: str) -> tuple[list[dict[str, Any]], str | None]:
-        if not self.candidate_endpoints:
-            logger.info("API 抓取跳过：未配置可用接口（请先运行 interface_detector 检查 XHR）")
+        try:
+            response = self.http.request("GET", self.endpoint)
+            data = response.json()
+        except Exception as exc:
+            logger.warning("API 抓取失败: %s", exc)
             return [], None
 
-        for endpoint in self.candidate_endpoints:
-            try:
-                records = self._fetch_from_endpoint(endpoint, issue_date)
-                if records:
-                    logger.info("API 抓取成功: %s, 条数=%s", endpoint, len(records))
-                    return records, endpoint
-                logger.info("API 返回为空: %s", endpoint)
-            except Exception as exc:
-                logger.warning("API 抓取失败: %s, 原因: %s", endpoint, exc)
-        logger.info("API 抓取未命中可用数据，将回退 HTML")
-        return [], None
+        if not isinstance(data, dict):
+            logger.warning("API 响应不是 JSON 对象")
+            return [], None
 
-    def _fetch_from_endpoint(self, endpoint: str, issue_date: str) -> list[dict[str, Any]]:
-        params = {"date": issue_date, "issue_date": issue_date, "play": "jczq"}
-        response = self.http.request("GET", endpoint, params=params)
-        ctype = response.headers.get("Content-Type", "")
-        if "json" not in ctype.lower() and not response.text.strip().startswith(("{", "[")):
-            return []
+        if data.get("success") is not True:
+            logger.warning("API success!=true, errorCode=%s", data.get("errorCode"))
+            return [], None
 
-        data = response.json()
-        raw_matches = self._extract_match_like_items(data)
-        converted = [self._map_raw_match(item) for item in raw_matches]
-        return [row for row in converted if row.get("home_team") and row.get("away_team")]
+        matches = self._extract_matches(data, issue_date)
+        logger.info("API 抓取完成: endpoint=%s, issue_date=%s, 条数=%s", self.endpoint, issue_date, len(matches))
+        return matches, self.endpoint
 
-    def _extract_match_like_items(self, data: Any) -> list[dict[str, Any]]:
-        found: list[dict[str, Any]] = []
+    def _extract_matches(self, payload: dict[str, Any], issue_date: str) -> list[dict[str, Any]]:
+        value = payload.get("value") or {}
+        match_info_list = value.get("matchInfoList") or []
 
-        def walk(node: Any) -> None:
-            if isinstance(node, dict):
-                keys = {k.lower() for k in node.keys()}
-                if {"home", "away"} & keys or {"hometeam", "awayteam"} & keys:
-                    found.append(node)
-                for value in node.values():
-                    walk(value)
-            elif isinstance(node, list):
-                for item in node:
-                    walk(item)
+        records: list[dict[str, Any]] = []
+        for bucket in match_info_list:
+            if not isinstance(bucket, dict):
+                continue
+            business_date = str(bucket.get("businessDate") or "").strip() or None
+            sub_list = bucket.get("subMatchList") or []
+            for item in sub_list:
+                if not isinstance(item, dict):
+                    continue
 
-        walk(data)
-        return found
+                # 按 issue_date 过滤：优先 businessDate；缺失时回退 matchDate 前 10 位
+                match_date = self._safe_str(item.get("matchDate"))
+                match_day = match_date[:10] if match_date else None
+                effective_date = business_date or match_day
+                if issue_date and effective_date and effective_date != issue_date:
+                    continue
+
+                kickoff_time = self._build_kickoff_time(item)
+                records.append(
+                    {
+                        "issue_date": effective_date or issue_date,
+                        "match_no": item.get("lineNum"),
+                        "league": item.get("leagueAllName") or item.get("leagueAbbName"),
+                        "home_team": item.get("homeTeamAllName") or item.get("homeTeamAbbName"),
+                        "away_team": item.get("awayTeamAllName") or item.get("awayTeamAbbName"),
+                        "kickoff_time": kickoff_time,
+                        "handicap": None,
+                        "sell_status": None,
+                        "play_spf": None,
+                        "play_rqspf": None,
+                        "play_score": None,
+                        "play_goals": None,
+                        "play_half_full": None,
+                        "source_url": "https://www.sporttery.cn/jc/zqszsc/",
+                        "scrape_time": datetime.now().isoformat(timespec="seconds"),
+                        "raw_id": item.get("matchId"),
+                    }
+                )
+
+        return records
 
     @staticmethod
-    def _pick(raw: dict[str, Any], *keys: str) -> Any:
-        for key in keys:
-            if key in raw and raw[key] not in ("", None):
-                return raw[key]
-            low_key = key.lower()
-            for k, v in raw.items():
-                if str(k).lower() == low_key and v not in ("", None):
-                    return v
-        return None
+    def _safe_str(value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        return str(value).strip()
 
-    def _map_raw_match(self, raw: dict[str, Any]) -> dict[str, Any]:
-        kickoff = self._pick(raw, "kickoff_time", "matchTime", "saleEndTime", "time")
-        return {
-            "issue_date": self._pick(raw, "issue_date", "date", "matchDate"),
-            "match_no": self._pick(raw, "match_no", "matchNumStr", "week", "matchCode"),
-            "league": self._pick(raw, "league", "leagueName", "l_cn_abbr"),
-            "home_team": self._pick(raw, "home_team", "home", "h_cn", "homeTeamName"),
-            "away_team": self._pick(raw, "away_team", "away", "a_cn", "awayTeamName"),
-            "kickoff_time": kickoff,
-            "handicap": self._pick(raw, "handicap", "rq", "concede", "letBall"),
-            "sell_status": self._pick(raw, "sell_status", "isSale", "status", "sellStatus"),
-            "play_spf": self._pick(raw, "play_spf", "spf", "is_single"),
-            "play_rqspf": self._pick(raw, "play_rqspf", "rqspf"),
-            "play_score": self._pick(raw, "play_score", "bf"),
-            "play_goals": self._pick(raw, "play_goals", "jq", "zjq"),
-            "play_half_full": self._pick(raw, "play_half_full", "bqc"),
-            "raw_id": self._pick(raw, "id", "matchId", "mid"),
-            "scrape_time": datetime.now().isoformat(timespec="seconds"),
-        }
+    def _build_kickoff_time(self, match: dict[str, Any]) -> str | None:
+        match_date = self._safe_str(match.get("matchDate"))
+        if match_date and len(match_date) >= 16:
+            return match_date
+
+        for key in ["matchTime", "saleEndTime", "startTime", "startSaleTime"]:
+            time_val = self._safe_str(match.get(key))
+            if not time_val:
+                continue
+            if match_date and len(match_date) >= 10 and len(time_val) <= 8 and ":" in time_val:
+                return f"{match_date[:10]} {time_val}"
+            return time_val
+
+        return match_date
