@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from dateutil.parser import parse as parse_date
@@ -27,11 +27,8 @@ def run(issue_date: str) -> dict[str, Any]:
     html_fetcher = HTMLFetcher()
     mobile_fetcher = MobileFetcher()
 
-    try:
-        raw_records, source_url = api_fetcher.fetch(issue_date)
-        strategy = "api"
-    except Exception as exc:
-        logger.warning("API 抓取异常，将回退 HTML: %s", exc)
+    raw_records, source_url = api_fetcher.fetch(issue_date)
+    strategy = "api"
 
     if not raw_records:
         logger.info("API 无可用数据，回退到 HTML 抓取")
@@ -44,7 +41,14 @@ def run(issue_date: str) -> dict[str, Any]:
         strategy = "mobile"
 
     if not raw_records:
-        raise RuntimeError("抓取失败：API/HTML/移动端均未返回有效比赛数据")
+        detail = (
+            "抓取失败：未获取到有效竞彩足球赛程数据。\n"
+            "- 旧 URL /jc/zqss/ 相关页面/接口已失效，请勿再使用。\n"
+            "- 当前应使用新入口：https://www.sporttery.cn/jc/zqszsc/\n"
+            "- 请先运行：python -m src.fetchers.interface_detector 检查当前页面 XHR。\n"
+            "- 若需要 Playwright 回退，请先执行：playwright install chromium"
+        )
+        raise RuntimeError(detail)
 
     normalized = normalize_matches(raw_records, issue_date=issue_date, source_url=source_url or "")
 

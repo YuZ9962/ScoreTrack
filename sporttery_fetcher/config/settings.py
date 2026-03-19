@@ -30,13 +30,15 @@ class Settings:
     save_html_snapshot: bool = os.getenv("SAVE_HTML_SNAPSHOT", "true").lower() == "true"
     playwright_headless: bool = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
 
+    # 2026-03 已切换到 zqszsc（竞彩足球赛事总赛程）
     schedule_urls: tuple[str, ...] = (
-        "https://www.sporttery.cn/jc/zqss/",
-        "https://www.sporttery.cn/jc/zqss/index.shtml",
+        "https://www.sporttery.cn/jc/zqszsc/",
+        "https://www.sporttery.cn/jc/zqszsc/index.shtml",
     )
+    # 后续赛果扩展入口
     result_urls: tuple[str, ...] = (
-        "https://www.sporttery.cn/jc/zqkj/",
-        "https://www.sporttery.cn/jc/zqkj/index.shtml",
+        "https://www.sporttery.cn/jc/zqsgkj/",
+        "https://www.sporttery.cn/jc/zqsgkj/index.shtml",
     )
     notice_urls: tuple[str, ...] = (
         "https://www.sporttery.cn/jc/zqgg/",

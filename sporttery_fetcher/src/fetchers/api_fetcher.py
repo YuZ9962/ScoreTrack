@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+import json
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from config.settings import settings
@@ -14,25 +16,54 @@ logger = get_logger(__name__)
 class APIFetcher:
     """优先尝试站内 API/XHR 的抓取器。"""
 
-    # 这些候选接口是基于体彩站点常见命名规则准备的，实际可通过 detect_xhr.py 动态更新。
-    CANDIDATE_ENDPOINTS = [
-        "https://www.sporttery.cn/jc/zqss/data/dggd_0.json",
-        "https://www.sporttery.cn/jc/zqss/data/schedule.json",
-        "https://www.sporttery.cn/jc/zqss/index_ajax.php",
-    ]
-
     def __init__(self, http_client: HTTPClient | None = None) -> None:
         self.http = http_client or HTTPClient()
+        self.candidate_endpoints = self._load_candidate_endpoints()
+
+    def _load_candidate_endpoints(self) -> list[str]:
+        # 优先环境变量（手动确认过最可靠）
+        raw = os.getenv("SPORTTERY_API_ENDPOINTS", "")
+        env_urls = [u.strip() for u in raw.split(",") if u.strip()]
+        if env_urls:
+            return env_urls
+
+        # 次选 interface_detector 输出，自动筛出 sporttery JSON/XHR URL
+        detector_file = settings.data_raw_dir / "detected_xhr.json"
+        if detector_file.exists():
+            try:
+                payload = json.loads(detector_file.read_text(encoding="utf-8"))
+                urls: list[str] = []
+                for item in payload:
+                    url = str(item.get("url", ""))
+                    if "sporttery" not in url:
+                        continue
+                    if any(x in url.lower() for x in [".js", ".css", ".png", ".jpg", ".gif"]):
+                        continue
+                    if url not in urls:
+                        urls.append(url)
+                if urls:
+                    logger.info("从 detected_xhr.json 加载到 %s 条 API 候选", len(urls))
+                    return urls
+            except Exception as exc:
+                logger.warning("读取 detected_xhr.json 失败: %s", exc)
+
+        return []
 
     def fetch(self, issue_date: str) -> tuple[list[dict[str, Any]], str | None]:
-        for endpoint in self.CANDIDATE_ENDPOINTS:
+        if not self.candidate_endpoints:
+            logger.info("API 抓取跳过：未配置可用接口（请先运行 interface_detector 检查 XHR）")
+            return [], None
+
+        for endpoint in self.candidate_endpoints:
             try:
                 records = self._fetch_from_endpoint(endpoint, issue_date)
                 if records:
                     logger.info("API 抓取成功: %s, 条数=%s", endpoint, len(records))
                     return records, endpoint
+                logger.info("API 返回为空: %s", endpoint)
             except Exception as exc:
                 logger.warning("API 抓取失败: %s, 原因: %s", endpoint, exc)
+        logger.info("API 抓取未命中可用数据，将回退 HTML")
         return [], None
 
     def _fetch_from_endpoint(self, endpoint: str, issue_date: str) -> list[dict[str, Any]]:

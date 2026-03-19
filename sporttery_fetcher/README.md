@@ -35,6 +35,7 @@ sporttery_fetcher/
   logs/
     app.log
   tests/
+    self_check.py
 ```
 
 ---
@@ -89,11 +90,14 @@ python -m src.main --date 2026-03-19
 ## 4. 抓取策略（两层 + 回退）
 
 1. **API 抓取器** `src/fetchers/api_fetcher.py`
-   - 优先尝试站内 JSON/XHR 接口。
-   - 如果接口不可用或响应不是 JSON，自动进入下一层。
+   - 不再默认尝试已失效旧接口。
+   - 如需启用 API，可通过 `SPORTTERY_API_ENDPOINTS` 注入（逗号分隔）。
+   - 未配置该环境变量时，会尝试读取 `data/raw/detected_xhr.json` 自动加载候选接口。
+   - 若仍无可用接口，会自动跳过并回退 HTML。
 
 2. **HTML 抓取器** `src/fetchers/html_fetcher.py`
-   - requests + BeautifulSoup 解析官方页面。
+   - requests + BeautifulSoup 解析官方新页面：
+     - `https://www.sporttery.cn/jc/zqszsc/`
    - 如页面动态渲染导致静态 HTML 无数据，自动回退 Playwright。
 
 3. **移动端兜底** `src/fetchers/mobile_fetcher.py`
@@ -108,7 +112,7 @@ python -m src.main --date 2026-03-19
 ```bash
 python -m src.fetchers.interface_detector
 # 或指定 URL
-python -m src.fetchers.interface_detector --url https://www.sporttery.cn/jc/zqss/
+python -m src.fetchers.interface_detector --url https://www.sporttery.cn/jc/zqszsc/
 ```
 
 脚本会：
@@ -167,11 +171,38 @@ SAVE_HTML_SNAPSHOT=false
 
 ---
 
-## 8. 后续扩展建议（下一阶段）
+## 8. 修复后验证步骤（推荐先跑）
 
-1. 复用同一框架新增“足球赛果开奖页”抓取器。  
+### 8.1 一键自检（页面访问 / HTML 解析 / detector 输出）
+
+```bash
+python tests/self_check.py --date 2026-03-19
+```
+
+该脚本会验证：
+1) 主页面 `https://www.sporttery.cn/jc/zqszsc/` 是否可访问。  
+2) HTML 抓取是否至少提取 1 场比赛。  
+3) `interface_detector` 是否成功输出 `data/raw/detected_xhr.json`（若本机未安装 Playwright，会给出安装提示，不影响前两项）。
+
+### 8.2 主程序验证
+
+```bash
+python -m src.main --date 2026-03-19
+```
+
+### 8.3 查看输出文件
+
+```bash
+ls -lh data/raw/2026-03-19_matches.json
+ls -lh data/processed/2026-03-19_matches.csv
+```
+
+---
+
+## 9. 后续扩展建议（下一阶段）
+
+1. 基于 `https://www.sporttery.cn/jc/zqsgkj/` 新增赛果抓取器。  
 2. 增加“赛事公告页”结构化解析（停售、延期、取消）。  
-3. 将接口检测结果自动写回 API 配置，提高可维护性。  
+3. 将 `detected_xhr.json` 的结果自动转成 API 配置，提高可维护性。  
 4. 引入数据库持久化（如 SQLite / Postgres）并加去重策略。  
 5. 增加字段质量检查（空值率、字段漂移告警）。
-
