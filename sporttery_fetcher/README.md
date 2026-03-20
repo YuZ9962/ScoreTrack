@@ -32,8 +32,8 @@ python -m src.main --date 2026-03-19
 
 - **Dashboard（首页）**：总览指标、联赛分布、抓取时间。
 - **Matches**：比赛列表、筛选、排序、单场详情。
-- **Match Detail**：单场比赛卡片式详情 + Gemini 预测按钮。
-- **Analytics**：每日趋势、联赛分布、handicap 分布、赔率摘要。
+- **Match Detail**：单场比赛卡片式详情 + Gemini 预测按钮（显示原始输出 + 结构化结果并落库）。
+- **Analytics**：每日趋势、联赛分布、handicap 分布、赔率摘要 + 按日期查看 Gemini 推荐。
 
 ### 2.2 前端直接抓取
 
@@ -67,7 +67,7 @@ python -m src.main --date <选中日期>
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-3-flash-preview
-GEMINI_THINKING_LEVEL=medium
+GEMINI_THINKING_LEVEL=high
 ```
 
 支持 thinking level：
@@ -116,6 +116,36 @@ pip install -U -r requirements.txt
 - 未配置 key：显示 `未配置 GEMINI_API_KEY`
 - 模型配置/API 错误：显示 `Gemini 请求失败，请检查模型配置或 API key`
 - 详细异常写日志，不在页面泄露 secret
+
+
+### 3.5 Gemini 输出二次整理与持久化
+
+每次在 `Match Detail` 点击「生成 Gemini 预测」后，系统会保留并写入两层结果：
+
+1. **原始层**
+   - `gemini_prompt`
+   - `gemini_raw_text`
+2. **结构化层（规则解析）**
+   - `gemini_match_result`（主胜/平/客胜）
+   - `gemini_handicap_result`（让胜/让平/让负）
+   - `gemini_score_1` / `gemini_score_2`
+   - `gemini_summary`
+
+并保存到：
+
+- `data/predictions/gemini_predictions.csv`
+
+去重规则：优先按 `issue_date + raw_id` 覆盖，`raw_id` 缺失时按 `issue_date + match_no + home_team + away_team` 覆盖。
+
+### 3.6 Analytics 的 Gemini 推荐分析
+
+Analytics 页面新增「Gemini 推荐分析」模块，支持：
+
+- 按 `issue_date` 选择日期（默认最新）
+- 联赛筛选
+- 主队/客队关键词筛选
+- 当天推荐总场次、胜平负推荐分布、让球推荐分布
+- 表格展示当天所有比赛 + Gemini 推荐结果
 
 ---
 

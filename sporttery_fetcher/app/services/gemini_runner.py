@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from google import genai
@@ -14,8 +15,9 @@ except Exception:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-3-flash-preview"
-DEFAULT_THINKING_LEVEL = "medium"
+DEFAULT_THINKING_LEVEL = "high"
 ALLOWED_THINKING_LEVELS = {"minimal", "low", "medium", "high"}
+
 
 
 def _resolve_model() -> str:
@@ -23,11 +25,13 @@ def _resolve_model() -> str:
     return model or DEFAULT_MODEL
 
 
+
 def _resolve_thinking_level() -> str:
     level = (os.getenv("GEMINI_THINKING_LEVEL") or "").strip().lower()
     if level in ALLOWED_THINKING_LEVELS:
         return level
     return DEFAULT_THINKING_LEVEL
+
 
 
 def _build_client() -> tuple[genai.Client | None, str | None]:
@@ -42,10 +46,12 @@ def _build_client() -> tuple[genai.Client | None, str | None]:
         return None, "Gemini 请求失败，请检查模型配置或 API key"
 
 
+
 def _is_thinking_config_error(exc: Exception) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     keywords = ["thinking_config", "extra inputs are not permitted", "extra_forbidden", "validationerror"]
     return any(k in text for k in keywords)
+
 
 
 def _build_thinking_config(thinking_level: str):
@@ -54,6 +60,12 @@ def _build_thinking_config(thinking_level: str):
     return genai_types.GenerateContentConfig(
         thinking_config=genai_types.ThinkingConfig(thinking_level=thinking_level)
     )
+
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 
 
 def run_gemini_prediction(prompt: str) -> dict[str, Any]:
@@ -69,10 +81,10 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
             "thinking_applied": False,
             "prompt": prompt,
             "text": "",
+            "generated_at": _now_iso(),
             "error": err,
         }
 
-    # 1) 优先尝试 thinking_config
     try:
         config = _build_thinking_config(thinking_level)
         response = client.models.generate_content(
@@ -89,6 +101,7 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
                 "thinking_applied": True,
                 "prompt": prompt,
                 "text": "",
+                "generated_at": _now_iso(),
                 "error": "Gemini 返回为空",
             }
         return {
@@ -98,6 +111,7 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
             "thinking_applied": True,
             "prompt": prompt,
             "text": text,
+            "generated_at": _now_iso(),
             "error": "",
         }
     except Exception as exc:
@@ -112,10 +126,10 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
                 "thinking_applied": False,
                 "prompt": prompt,
                 "text": "",
+                "generated_at": _now_iso(),
                 "error": "Gemini 请求失败，请检查模型配置或 API key",
             }
 
-    # 2) 回退：不带 thinking_config
     try:
         response = client.models.generate_content(
             model=model,
@@ -130,6 +144,7 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
                 "thinking_applied": False,
                 "prompt": prompt,
                 "text": "",
+                "generated_at": _now_iso(),
                 "error": "Gemini 返回为空",
             }
         return {
@@ -139,6 +154,7 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
             "thinking_applied": False,
             "prompt": prompt,
             "text": text,
+            "generated_at": _now_iso(),
             "error": "",
         }
     except Exception:
@@ -150,5 +166,6 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
             "thinking_applied": False,
             "prompt": prompt,
             "text": "",
+            "generated_at": _now_iso(),
             "error": "Gemini 请求失败，请检查模型配置或 API key",
         }
