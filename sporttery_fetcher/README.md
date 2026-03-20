@@ -65,8 +65,19 @@ python -m src.main --date <选中日期>
 在 `.env` 中配置：
 
 ```env
-GEMINI_API_KEY=你的key
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_THINKING_LEVEL=medium
 ```
+
+支持 thinking level：
+- minimal
+- low
+- medium
+- high
+
+> 注意：Gemini 3 的 thinking 不是单独模型名，不要写 `gemini-3-thinking`。
+> 使用 Gemini 3 系列模型 + `GEMINI_THINKING_LEVEL` 控制思考强度。
 
 ### 3.2 提示词模板（固定风格）
 
@@ -86,6 +97,11 @@ GEMINI_API_KEY=你的key
 3. 页面显示：
    - 实际发送给 Gemini 的提示词
    - Gemini 返回的原始文本
+
+失败处理：
+- 未配置 key：显示 `未配置 GEMINI_API_KEY`
+- 模型配置/API 错误：显示 `Gemini 请求失败，请检查模型配置或 API key`
+- 详细异常写日志，不在页面泄露 secret
 
 ---
 
@@ -133,6 +149,7 @@ streamlit run app/app.py
 
 3. **Gemini 调用失败**
    - 检查 `GEMINI_API_KEY` 是否已配置
+   - 检查 `GEMINI_MODEL` 是否有效
    - 检查本机网络是否可访问 Gemini API
 
 4. **Streamlit 启动失败**

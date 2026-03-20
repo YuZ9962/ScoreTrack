@@ -12,7 +12,7 @@ if str(APP_DIR) not in sys.path:
 
 from components.data_controls import render_date_file_selector, render_fetch_section
 from components.detail_cards import render_match_detail
-from services.gemini_runner import call_gemini_text
+from services.gemini_runner import run_gemini_prediction
 from services.loader import get_data_context, load_matches_by_date
 from services.transforms import normalize_dataframe
 from utils.prompt_builder import build_simple_prediction_prompt
@@ -62,19 +62,18 @@ prompt = build_simple_prediction_prompt(
 
 if st.button("生成 Gemini 预测", type="primary"):
     with st.spinner("正在调用 Gemini 生成预测..."):
-        result = call_gemini_text(prompt)
+        result = run_gemini_prediction(prompt)
     st.session_state["gemini_last_result"] = result
-    st.session_state["gemini_last_prompt"] = prompt
 
-if "gemini_last_prompt" in st.session_state:
+result = st.session_state.get("gemini_last_result")
+if result:
     st.markdown("**发送给 Gemini 的提示词：**")
-    st.code(st.session_state["gemini_last_prompt"], language="text")
+    st.code(result.get("prompt", prompt), language="text")
 
-if "gemini_last_result" in st.session_state:
-    r = st.session_state["gemini_last_result"]
-    if r.get("ok"):
+    if result.get("ok"):
         st.success("Gemini 返回成功")
+        st.caption(f"模型：{result.get('model')} | thinking_level：{result.get('thinking_level')}")
         st.markdown("**Gemini 返回结果：**")
-        st.write(r.get("text", ""))
+        st.write(result.get("text", ""))
     else:
-        st.error(r.get("error", "Gemini 调用失败"))
+        st.error(result.get("error", "Gemini 调用失败"))
