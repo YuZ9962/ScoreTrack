@@ -73,6 +73,7 @@ if result:
     if result.get("ok"):
         st.success("Gemini 返回成功")
         st.caption(f"模型：{result.get('model')} | thinking_level：{result.get('thinking_level')}")
+        st.write(f"是否启用 thinking：{'是' if result.get('thinking_applied') else '否'}")
         st.markdown("**Gemini 返回结果：**")
         st.write(result.get("text", ""))
     else:

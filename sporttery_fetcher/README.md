@@ -76,10 +76,23 @@ GEMINI_THINKING_LEVEL=medium
 - medium
 - high
 
-> 注意：Gemini 3 的 thinking 不是单独模型名，不要写 `gemini-3-thinking`。
+> 注意：Gemini 3 的 thinking 不是单独模型名，不要写 `gemini-3-thinking`。  
 > 使用 Gemini 3 系列模型 + `GEMINI_THINKING_LEVEL` 控制思考强度。
 
-### 3.2 提示词模板（固定风格）
+### 3.2 SDK 兼容说明（本次修复）
+
+- 项目使用官方 SDK：`google-genai>=1.0.0`
+- 代码会先尝试 `thinking_config`
+- 若本地 SDK 版本/接口不支持（如出现 validation/extra_forbidden/thinking_config 错误），会自动回退到**不带 thinking_config**模式，确保尽量返回结果
+- 前端会显示：`是否启用 thinking：是/否`
+
+升级依赖：
+
+```bash
+pip install -U -r requirements.txt
+```
+
+### 3.3 提示词模板（固定风格）
 
 程序使用固定模板：
 
@@ -89,7 +102,7 @@ GEMINI_THINKING_LEVEL=medium
 
 不会加入赔率或复杂结构化分析。
 
-### 3.3 使用方式
+### 3.4 使用方式
 
 进入 `Match Detail` 页：
 1. 选择一场比赛
@@ -97,6 +110,7 @@ GEMINI_THINKING_LEVEL=medium
 3. 页面显示：
    - 实际发送给 Gemini 的提示词
    - Gemini 返回的原始文本
+   - 是否启用 thinking（是/否）
 
 失败处理：
 - 未配置 key：显示 `未配置 GEMINI_API_KEY`
@@ -150,7 +164,7 @@ streamlit run app/app.py
 3. **Gemini 调用失败**
    - 检查 `GEMINI_API_KEY` 是否已配置
    - 检查 `GEMINI_MODEL` 是否有效
-   - 检查本机网络是否可访问 Gemini API
+   - 先执行 `pip install -U -r requirements.txt`
 
 4. **Streamlit 启动失败**
    - 确认依赖已安装：`pip install -r requirements.txt`
