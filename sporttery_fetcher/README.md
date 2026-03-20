@@ -32,10 +32,10 @@ python -m src.main --date 2026-03-19
 
 - **Dashboard（首页）**：总览指标、联赛分布、抓取时间。
 - **Matches**：比赛列表、筛选、排序、单场详情。
-- **Match Detail**：单场比赛卡片式详情。
+- **Match Detail**：单场比赛卡片式详情 + Gemini 预测按钮。
 - **Analytics**：每日趋势、联赛分布、handicap 分布、赔率摘要。
 
-### 2.2 新增交互：前端直接抓取
+### 2.2 前端直接抓取
 
 每个页面左侧 sidebar 都有「抓取数据」区域：
 - 日期选择器
@@ -58,7 +58,38 @@ python -m src.main --date <选中日期>
 
 ---
 
-## 3. 安装
+## 3. Gemini 预测功能（Match Detail 页）
+
+### 3.1 环境变量
+
+在 `.env` 中配置：
+
+```env
+GEMINI_API_KEY=你的key
+```
+
+### 3.2 提示词模板（固定风格）
+
+程序使用固定模板：
+
+```text
+你是一名足球分析师，针对{league}{home_team}vs{away_team}比赛，分析并且预测胜负结果和主队{handicap_text}胜负结果以及两个最可能打出的比分。
+```
+
+不会加入赔率或复杂结构化分析。
+
+### 3.3 使用方式
+
+进入 `Match Detail` 页：
+1. 选择一场比赛
+2. 点击 `生成 Gemini 预测`
+3. 页面显示：
+   - 实际发送给 Gemini 的提示词
+   - Gemini 返回的原始文本
+
+---
+
+## 4. 安装
 
 ```bash
 cd sporttery_fetcher
@@ -70,7 +101,7 @@ playwright install chromium
 
 ---
 
-## 4. 启动前端
+## 5. 启动前端
 
 ```bash
 streamlit run app/app.py
@@ -81,36 +112,12 @@ streamlit run app/app.py
 
 ---
 
-## 5. 前端数据来源规则
+## 6. 前端数据来源规则
 
 - 直接读取：`data/processed/*_matches.csv`
 - 默认选择最新日期文件
 - 支持手动切换日期文件
 - 无文件/空数据均有友好提示
-
----
-
-## 6. 字段（CSV）
-
-前端默认使用字段：
-
-- issue_date
-- match_no
-- league
-- home_team
-- away_team
-- kickoff_time
-- handicap
-- sell_status
-- spf_win
-- spf_draw
-- spf_lose
-- rqspf_win
-- rqspf_draw
-- rqspf_lose
-- source_url
-- scrape_time
-- raw_id
 
 ---
 
@@ -124,5 +131,9 @@ streamlit run app/app.py
    - 页面只显示简洁失败提示
    - 详细技术信息查看 `logs/app.log`
 
-3. **Streamlit 启动失败**
+3. **Gemini 调用失败**
+   - 检查 `GEMINI_API_KEY` 是否已配置
+   - 检查本机网络是否可访问 Gemini API
+
+4. **Streamlit 启动失败**
    - 确认依赖已安装：`pip install -r requirements.txt`

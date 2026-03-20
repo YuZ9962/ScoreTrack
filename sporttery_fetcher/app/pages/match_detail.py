@@ -12,8 +12,10 @@ if str(APP_DIR) not in sys.path:
 
 from components.data_controls import render_date_file_selector, render_fetch_section
 from components.detail_cards import render_match_detail
+from services.gemini_runner import call_gemini_text
 from services.loader import get_data_context, load_matches_by_date
 from services.transforms import normalize_dataframe
+from utils.prompt_builder import build_simple_prediction_prompt
 
 st.set_page_config(page_title="比赛详情", page_icon="🔎", layout="wide")
 st.title("🔎 比赛详情")
@@ -45,4 +47,34 @@ label_series = (
 )
 idx = st.selectbox("选择比赛", options=list(range(len(df))), format_func=lambda i: label_series.iloc[i])
 
-render_match_detail(df.iloc[int(idx)])
+match = df.iloc[int(idx)]
+render_match_detail(match)
+
+st.markdown("---")
+st.subheader("Gemini 预测")
+
+prompt = build_simple_prediction_prompt(
+    league=str(match.get("league", "")),
+    home_team=str(match.get("home_team", "")),
+    away_team=str(match.get("away_team", "")),
+    handicap=match.get("handicap", None),
+)
+
+if st.button("生成 Gemini 预测", type="primary"):
+    with st.spinner("正在调用 Gemini 生成预测..."):
+        result = call_gemini_text(prompt)
+    st.session_state["gemini_last_result"] = result
+    st.session_state["gemini_last_prompt"] = prompt
+
+if "gemini_last_prompt" in st.session_state:
+    st.markdown("**发送给 Gemini 的提示词：**")
+    st.code(st.session_state["gemini_last_prompt"], language="text")
+
+if "gemini_last_result" in st.session_state:
+    r = st.session_state["gemini_last_result"]
+    if r.get("ok"):
+        st.success("Gemini 返回成功")
+        st.markdown("**Gemini 返回结果：**")
+        st.write(r.get("text", ""))
+    else:
+        st.error(r.get("error", "Gemini 调用失败"))
