@@ -102,26 +102,32 @@ if st.button("生成 Gemini 预测", type="primary"):
 
 result = st.session_state.get("gemini_last_result")
 if result:
-    st.markdown("**发送给 Gemini 的提示词：**")
-    st.code(result.get("prompt", prompt), language="text")
-
     if result.get("ok"):
         st.success("Gemini 返回成功")
-        st.caption(f"模型：{result.get('model')} | thinking_level：{result.get('thinking_level')}")
-
-        st.markdown("**Gemini 原始输出：**")
-        st.write(result.get("text", ""))
-
         structured = result.get("structured", {})
-        st.markdown("**整理后的结构化结果：**")
+
+        st.markdown("### 结构化推荐结果")
         c1, c2 = st.columns(2)
-        c1.write(f"- 胜平负推荐：{structured.get('gemini_match_result') or '未识别'}")
-        c1.write(f"- 让球推荐：{structured.get('gemini_handicap_result') or '未识别'}")
-        c2.write(f"- 最可能比分 1：{structured.get('gemini_score_1') or '未识别'}")
-        c2.write(f"- 最可能比分 2：{structured.get('gemini_score_2') or '未识别'}")
-        st.write(f"- 简短摘要：{structured.get('gemini_summary') or '未生成'}")
+        c1.metric("胜平负主推", structured.get("gemini_match_main_pick") or "未识别")
+        c1.metric("胜平负次推", structured.get("gemini_match_secondary_pick") or "无")
+        c1.metric("让球胜平负主推", structured.get("gemini_handicap_main_pick") or "未识别")
+        c1.metric("让球胜平负次推", structured.get("gemini_handicap_secondary_pick") or "无")
+
+        c2.metric("比分1", structured.get("gemini_score_1") or "未识别")
+        c2.metric("比分2", structured.get("gemini_score_2") or "未识别")
+        c2.write(f"**模型名**：{structured.get('gemini_model') or '-'}")
+        c2.write(f"**thinking level**：{structured.get('gemini_thinking_level') or '-'}")
+        c2.write(f"**生成时间**：{structured.get('gemini_generated_at') or '-'}")
+
+        st.write(f"**简短摘要**：{structured.get('gemini_summary') or '未生成'}")
 
         if result.get("saved_path"):
             st.caption(f"已保存至：{result['saved_path']}")
+
+        with st.expander("查看发送的提示词", expanded=False):
+            st.code(result.get("prompt", prompt), language="text")
+
+        with st.expander("查看 Gemini 原始回复", expanded=False):
+            st.write(result.get("text", ""))
     else:
         st.error(result.get("error", "Gemini 调用失败"))

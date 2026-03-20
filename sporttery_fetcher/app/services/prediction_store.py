@@ -16,8 +16,10 @@ PREDICTION_COLUMNS = [
     "raw_id",
     "gemini_prompt",
     "gemini_raw_text",
-    "gemini_match_result",
-    "gemini_handicap_result",
+    "gemini_match_main_pick",
+    "gemini_match_secondary_pick",
+    "gemini_handicap_main_pick",
+    "gemini_handicap_secondary_pick",
     "gemini_score_1",
     "gemini_score_2",
     "gemini_summary",
@@ -26,10 +28,21 @@ PREDICTION_COLUMNS = [
     "gemini_generated_at",
 ]
 
+LEGACY_COLUMN_MAPPING = {
+    "gemini_match_result": "gemini_match_main_pick",
+    "gemini_handicap_result": "gemini_handicap_main_pick",
+}
+
 
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+
+    # 兼容旧字段，自动迁移到新字段命名
+    for legacy_col, new_col in LEGACY_COLUMN_MAPPING.items():
+        if new_col not in out.columns and legacy_col in out.columns:
+            out[new_col] = out[legacy_col]
+
     for col in PREDICTION_COLUMNS:
         if col not in out.columns:
             out[col] = None

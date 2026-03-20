@@ -94,23 +94,31 @@ pip install -U -r requirements.txt
 
 ### 3.3 提示词模板（固定风格）
 
-程序使用固定模板：
+程序使用固定模板（自然语言分析 + 固定格式尾部）：
 
 ```text
 你是一名足球分析师，针对{league}{home_team}vs{away_team}比赛，分析并且预测胜负结果和主队{handicap_text}胜负结果以及两个最可能打出的比分。
+
+请先给出简洁清晰的分析。
+
+请在分析结尾严格补充以下内容（每项单独一行）：
+胜平负主推：<主胜/平/客胜>
+胜平负次推：<主胜/平/客胜/无>
+让球胜平负主推：<让胜/让平/让负>
+让球胜平负次推：<让胜/让平/让负/无>
+比分1：<比分>
+比分2：<比分>
 ```
 
-不会加入赔率或复杂结构化分析。
+不会加入赔率，不会改成 JSON 模式。
 
 ### 3.4 使用方式
 
 进入 `Match Detail` 页：
 1. 选择一场比赛
 2. 点击 `生成 Gemini 预测`
-3. 页面显示：
-   - 实际发送给 Gemini 的提示词
-   - Gemini 返回的原始文本
-   - 是否启用 thinking（是/否）
+3. 页面主界面优先展示结构化字段：主推/次推、两个比分、摘要、模型、thinking level、生成时间
+4. 原始回复与发送提示词默认收起在折叠面板中
 
 失败处理：
 - 未配置 key：显示 `未配置 GEMINI_API_KEY`
@@ -126,8 +134,8 @@ pip install -U -r requirements.txt
    - `gemini_prompt`
    - `gemini_raw_text`
 2. **结构化层（规则解析）**
-   - `gemini_match_result`（主胜/平/客胜）
-   - `gemini_handicap_result`（让胜/让平/让负）
+   - `gemini_match_main_pick` / `gemini_match_secondary_pick`
+   - `gemini_handicap_main_pick` / `gemini_handicap_secondary_pick`
    - `gemini_score_1` / `gemini_score_2`
    - `gemini_summary`
 
@@ -144,8 +152,9 @@ Analytics 页面新增「Gemini 推荐分析」模块，支持：
 - 按 `issue_date` 选择日期（默认最新）
 - 联赛筛选
 - 主队/客队关键词筛选
-- 当天推荐总场次、胜平负推荐分布、让球推荐分布
-- 表格展示当天所有比赛 + Gemini 推荐结果
+- 只看有次推的比赛
+- 当天推荐总场次、胜平负主推分布、让球主推分布
+- 表格展示当天所有比赛 + Gemini 推荐结果（含主推/次推）
 
 ---
 

@@ -82,6 +82,7 @@ if filtered.empty:
 league_options = sorted(filtered["league"].fillna("").astype(str).unique().tolist())
 selected_leagues = st.multiselect("联赛筛选", options=league_options)
 team_keyword = st.text_input("主队/客队关键词", placeholder="输入球队名关键字")
+only_has_secondary = st.checkbox("只看有次推的比赛", value=False)
 
 if selected_leagues:
     filtered = filtered[filtered["league"].astype(str).isin(selected_leagues)]
@@ -92,6 +93,16 @@ if team_keyword.strip():
     away = filtered["away_team"].fillna("").astype(str).str.lower()
     filtered = filtered[home.str.contains(kw) | away.str.contains(kw)]
 
+if only_has_secondary:
+    secondary_mask = (
+        filtered["gemini_match_secondary_pick"].fillna("").astype(str).str.strip().ne("")
+        & filtered["gemini_match_secondary_pick"].fillna("").astype(str).str.strip().ne("无")
+    ) | (
+        filtered["gemini_handicap_secondary_pick"].fillna("").astype(str).str.strip().ne("")
+        & filtered["gemini_handicap_secondary_pick"].fillna("").astype(str).str.strip().ne("无")
+    )
+    filtered = filtered[secondary_mask]
+
 if filtered.empty:
     st.info("筛选后暂无 Gemini 推荐数据。")
     st.stop()
@@ -99,8 +110,8 @@ if filtered.empty:
 st.markdown("**统计概览**")
 c1, c2, c3 = st.columns(3)
 c1.metric("推荐总场次", len(filtered))
-match_counts = filtered["gemini_match_result"].fillna("未识别").value_counts().to_dict()
-handicap_counts = filtered["gemini_handicap_result"].fillna("未识别").value_counts().to_dict()
+match_counts = filtered["gemini_match_main_pick"].fillna("未识别").value_counts().to_dict()
+handicap_counts = filtered["gemini_handicap_main_pick"].fillna("未识别").value_counts().to_dict()
 c2.write({"主胜": match_counts.get("主胜", 0), "平": match_counts.get("平", 0), "客胜": match_counts.get("客胜", 0)})
 c3.write({"让胜": handicap_counts.get("让胜", 0), "让平": handicap_counts.get("让平", 0), "让负": handicap_counts.get("让负", 0)})
 
@@ -112,8 +123,10 @@ show_cols = [
     "away_team",
     "kickoff_time",
     "handicap",
-    "gemini_match_result",
-    "gemini_handicap_result",
+    "gemini_match_main_pick",
+    "gemini_match_secondary_pick",
+    "gemini_handicap_main_pick",
+    "gemini_handicap_secondary_pick",
     "gemini_score_1",
     "gemini_score_2",
     "gemini_summary",
