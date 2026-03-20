@@ -11,8 +11,9 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+from components.data_controls import render_date_file_selector, render_fetch_section
 from components.summary_cards import render_summary_cards
-from services.loader import available_date_options, get_data_context, get_latest_date, load_matches_by_date
+from services.loader import get_data_context, load_matches_by_date
 from services.transforms import normalize_dataframe
 
 st.set_page_config(page_title="竞彩足球仪表盘", page_icon="⚽", layout="wide")
@@ -20,15 +21,12 @@ st.title("⚽ 竞彩足球数据工作台")
 st.caption("首页总览（Dashboard）")
 
 ctx = get_data_context(ROOT)
-options = available_date_options(ctx)
+render_fetch_section(ROOT)
+selected_date = render_date_file_selector(ctx)
 
-if not options:
-    st.warning("未找到 CSV 数据文件，请先运行抓取命令生成 data/processed/*.csv")
+if not selected_date:
+    st.warning("未找到 CSV 数据文件，请先在左侧点击『抓取并加载』")
     st.stop()
-
-latest = get_latest_date(ctx)
-default_idx = options.index(latest) if latest in options else len(options) - 1
-selected_date = st.sidebar.selectbox("选择日期文件", options=options, index=default_idx)
 
 try:
     df = load_matches_by_date(selected_date, ctx)
