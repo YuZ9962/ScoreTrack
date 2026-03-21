@@ -19,6 +19,7 @@ logger = get_logger("result_fetcher")
 KEYWORDS = ["周四", "比分", "开奖", "主队", "客队"]
 SCORE_PATTERN = re.compile(r"(?<!\d)([0-9])\s*[-:：]\s*([0-9])(?!\d)")
 DATE_PATTERN = re.compile(r"\b\d{4}[-/]\d{2}[-/]\d{2}\b")
+MATCH_NO_PATTERN = re.compile(r"周[一二三四五六日天]\d{3}")
 
 
 @dataclass
@@ -78,20 +79,88 @@ class ResultFetcher:
 
         return {
             "score": find_index(["全场比分(90分钟)", "全场比分"]),
-            "match_no": find_index(["场次编号", "场次", "编号"]),
+            "match_no": find_index(["赛事编号", "场次编号", "场次", "编号"]),
             "league": find_index(["联赛"]),
-            "home_team": find_index(["主队"]),
+            "team_vs": find_index(["主队(让球)vs客队", "主队vs客队", "主队（让球）vs客队"]),
             "away_team": find_index(["客队"]),
             "result_match": find_index(["胜平负"]),
             "result_handicap": find_index(["让胜平负"]),
-            "issue_date": find_index(["日期", "比赛日期", "开奖日期"]),
+            "issue_date": find_index(["赛事日期", "日期", "比赛日期", "开奖日期"]),
+            "status": find_index(["状态"]),
+            "draw_result": find_index(["开奖结果", "开奖结果"]),
         }
+
+    def _is_header_table(self, headers: list[str]) -> bool:
+        normalized = [self._normalize_header_text(h) for h in headers]
+        expected = [
+            "赛事日期",
+            "赛事编号",
+            "联赛",
+            "主队(让球)vs客队",
+            "半场比分",
+            "全场比分(90分钟)",
+            "开奖结果",
+        ]
+        hits = 0
+        for e in expected:
+            ne = self._normalize_header_text(e)
+            if any(ne in h for h in normalized):
+                hits += 1
+        return hits >= 4
+
+    def _is_data_table(self, table: Any) -> bool:
+        first_tr = table.select_one("tr")
+        if not first_tr:
+            return False
+        first_cells = [c.get_text(" ", strip=True) for c in first_tr.find_all(["td", "th"])]
+        if len(first_cells) < 3:
+            return False
+        first_col = str(first_cells[0] or "").strip()
+        second_col = str(first_cells[1] or "").strip()
+        third_col = str(first_cells[2] or "").strip()
+        return bool(re.match(r"\d{4}-\d{2}-\d{2}", first_col) and MATCH_NO_PATTERN.search(second_col) and third_col)
 
     def _row_value_by_index(self, cells: list[str], idx: int | None) -> str | None:
         if idx is None or idx < 0 or idx >= len(cells):
             return None
         value = str(cells[idx] or "").strip()
         return value or None
+
+    def _parse_team_vs(self, team_vs_text: str | None) -> tuple[str | None, str | None, str | None]:
+        if not team_vs_text:
+            return None, None, None
+        text = str(team_vs_text).strip()
+        m = re.match(r"^\s*(.+?)\s*(?:\(([+-]?\d+)\))?\s*(?:VS|vs|Vs|vS)\s*(.+?)\s*$", text)
+        if m:
+            return m.group(1).strip(), m.group(3).strip(), m.group(2)
+        parts = re.split(r"\s*(?:VS|vs|Vs|vS)\s*", text)
+        if len(parts) >= 2:
+            home_raw = parts[0].strip()
+            away = parts[1].strip()
+            hm = re.match(r"^(.*?)\s*\(([+-]?\d+)\)\s*$", home_raw)
+            if hm:
+                return hm.group(1).strip(), away, hm.group(2)
+            return home_raw, away, None
+        return None, None, None
+
+    def _parse_handicap_result(self, score: str | None, handicap: str | None) -> str | None:
+        if not score or not handicap:
+            return None
+        m = re.match(r"^\s*([0-9]+)-([0-9]+)\s*$", score)
+        if not m:
+            return None
+        try:
+            home = int(m.group(1))
+            away = int(m.group(2))
+            hcap = int(str(handicap))
+        except Exception:
+            return None
+        adjusted_home = home + hcap
+        if adjusted_home > away:
+            return "让胜"
+        if adjusted_home == away:
+            return "让平"
+        return "让负"
 
     def _parse_table_rows(
         self, table: Any, score_col_idx: int, col_map: dict[str, int | None], issue_date_hint: str | None = None
@@ -103,9 +172,18 @@ class ResultFetcher:
             cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
             if not cells:
                 continue
-            if tr.find_all("th"):
-                continue
             if score_col_idx >= len(cells):
+                continue
+
+            issue_date = self._row_value_by_index(cells, col_map.get("issue_date")) or issue_date_hint
+            match_no = self._row_value_by_index(cells, col_map.get("match_no"))
+            league = self._row_value_by_index(cells, col_map.get("league"))
+            team_vs = self._row_value_by_index(cells, col_map.get("team_vs"))
+            status_text = self._row_value_by_index(cells, col_map.get("status")) or ""
+            draw_text = self._row_value_by_index(cells, col_map.get("draw_result")) or ""
+            if not issue_date and not match_no and tr.find_all("th"):
+                continue
+            if not issue_date and not match_no and not league and not team_vs:
                 continue
 
             score_candidate = self._row_value_by_index(cells, score_col_idx)
@@ -113,32 +191,33 @@ class ResultFetcher:
             if score and score_candidate and self._looks_like_date_fragment(score, score_candidate):
                 logger.warning("识别到日期型比分候选，已忽略 candidate=%s score=%s", score_candidate, score)
                 score = None
-            if not score:
-                continue
-
-            if debug_count < 3:
-                self._log_score_debug(cells, score_candidate, score)
-                debug_count += 1
-
-            issue_date = self._row_value_by_index(cells, col_map.get("issue_date")) or issue_date_hint
+            home_team, away_team, handicap = self._parse_team_vs(team_vs)
             if issue_date and re.match(r"\d{4}-\d{2}-\d{2}", issue_date):
                 issue_date = issue_date[:10]
 
+            pending = (not score) or ("待开奖" in status_text) or (not draw_text)
+            result_match = "未开奖" if pending else self._parse_outcome(score or "")
+            result_handicap = "未开奖" if pending else (self._parse_handicap_result(score, handicap) or None)
+
             row = {
                 "issue_date": issue_date,
-                "match_no": self._row_value_by_index(cells, col_map.get("match_no")),
-                "league": self._row_value_by_index(cells, col_map.get("league")),
-                "home_team": self._row_value_by_index(cells, col_map.get("home_team")),
-                "away_team": self._row_value_by_index(cells, col_map.get("away_team")),
+                "match_no": match_no,
+                "league": league,
+                "home_team": home_team,
+                "away_team": away_team,
+                "handicap": handicap,
                 "kickoff_time": None,
                 "full_time_score": score,
-                "result_match": self._row_value_by_index(cells, col_map.get("result_match")) or self._parse_outcome(score),
-                "result_handicap": self._row_value_by_index(cells, col_map.get("result_handicap")),
+                "result_match": result_match,
+                "result_handicap": result_handicap,
                 "raw_result_text": " | ".join(cells),
                 "result_generated_at": datetime.now(timezone.utc).isoformat(),
                 "raw_id": None,
             }
             rows.append(row)
+            if debug_count < 3:
+                logger.info("赛果解析样本[%s]=%s", debug_count + 1, row)
+                debug_count += 1
 
         return rows
 
@@ -174,6 +253,9 @@ class ResultFetcher:
         candidate_count = len(tables)
         logger.info("HTML 解析候选 table=%s source=%s", candidate_count, source_label)
 
+        header_table_idx: int | None = None
+        header_map: dict[str, int | None] | None = None
+
         for idx, table in enumerate(tables, start=1):
             header_cells = table.select("tr th")
             headers = [h.get_text(" ", strip=True) for h in header_cells]
@@ -186,21 +268,33 @@ class ResultFetcher:
                 continue
 
             logger.info("赛果表格[%s]表头=%s", idx, headers)
-            col_map = self._resolve_column_indices(headers)
-            score_col_idx = col_map.get("score")
-            logger.info("赛果表格[%s] “全场比分（90分钟）”列索引=%s", idx, score_col_idx)
+            if self._is_header_table(headers):
+                header_table_idx = idx
+                header_map = self._resolve_column_indices(headers)
+                logger.info("识别到赛果表头表 index=%s", idx)
+                logger.info("赛果表头列映射=%s", header_map)
+                logger.info("赛果表格[%s] “全场比分（90分钟）”列索引=%s", idx, header_map.get("score"))
+                break
 
-            if score_col_idx is None:
+        if header_table_idx is None or header_map is None or header_map.get("score") is None:
+            if tables:
+                logger.warning("未找到列：全场比分（90分钟）")
+                self._save_snapshot(html_text, prefix=f"result_missing_score_col_{source_label}")
+            return rows, candidate_count
+
+        for idx, table in enumerate(tables, start=1):
+            if idx <= header_table_idx:
                 continue
-
-            table_rows = self._parse_table_rows(table, score_col_idx=score_col_idx, col_map=col_map)
+            if not self._is_data_table(table):
+                continue
+            logger.info("识别到赛果数据表 index=%s", idx)
+            table_rows = self._parse_table_rows(table, score_col_idx=header_map["score"], col_map=header_map)
             if table_rows:
                 rows.extend(table_rows)
                 break
 
-        if not rows and tables:
-            logger.warning("未找到列：全场比分（90分钟）")
-            self._save_snapshot(html_text, prefix=f"result_missing_score_col_{source_label}")
+        if not rows:
+            logger.warning("未解析到赛果数据行 source=%s", source_label)
 
         return rows, candidate_count
 
