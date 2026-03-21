@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import json
@@ -17,11 +17,14 @@ from src.utils.logger import get_logger
 logger = get_logger("result_fetcher")
 
 KEYWORDS = ["周四", "比分", "开奖", "主队", "客队"]
+SCORE_PATTERN = re.compile(r"(?<!\d)([0-9])\s*[-:：]\s*([0-9])(?!\d)")
+DATE_PATTERN = re.compile(r"\b\d{4}[-/]\d{2}[-/]\d{2}\b")
 
 
 @dataclass
 class ResultFetcher:
     client: HTTPClient
+    _debug_sample_count: int = field(default=0, init=False, repr=False)
 
     def _parse_outcome(self, score: str) -> str | None:
         m = re.match(r"\s*(\d{1,2})\s*[-:：]\s*(\d{1,2})\s*", str(score or ""))
@@ -34,16 +37,77 @@ class ResultFetcher:
             return "平"
         return "客胜"
 
+    def _normalize_score(self, score_text: str | None) -> str | None:
+        if not score_text:
+            return None
+        m = SCORE_PATTERN.search(str(score_text))
+        if not m:
+            return None
+        score = f"{m.group(1)}-{m.group(2)}"
+        if score in {"26-03", "03-20"}:
+            logger.warning("识别到疑似日期片段比分，已丢弃 score=%s source=%s", score, score_text)
+            return None
+        return score
+
+    def _looks_like_date_fragment(self, score: str, source_text: str) -> bool:
+        if DATE_PATTERN.search(source_text):
+            parts = score.split("-")
+            if len(parts) == 2 and all(p.isdigit() for p in parts):
+                left, right = int(parts[0]), int(parts[1])
+                if (left > 12 or right > 12) and (left >= 20 or right >= 20):
+                    return True
+        return False
+
+    def _extract_score_from_cells(self, cells: list[str]) -> tuple[str | None, str | None]:
+        clean_cells = [str(c or "").strip() for c in cells if str(c or "").strip()]
+        if not clean_cells:
+            return None, None
+
+        explicit_candidates: list[str] = []
+        compact_candidates: list[str] = []
+        fallback_candidates: list[str] = []
+
+        for cell in clean_cells:
+            lower = cell.lower()
+            if any(k in cell for k in ["比分", "赛果", "开奖"]) and SCORE_PATTERN.search(cell):
+                explicit_candidates.append(cell)
+                continue
+            if SCORE_PATTERN.fullmatch(cell):
+                compact_candidates.append(cell)
+                continue
+            if SCORE_PATTERN.search(cell) and not DATE_PATTERN.search(cell):
+                fallback_candidates.append(cell)
+
+        for candidate in [*explicit_candidates, *compact_candidates, *fallback_candidates]:
+            score = self._normalize_score(candidate)
+            if not score:
+                continue
+            if self._looks_like_date_fragment(score, candidate):
+                logger.warning("识别到日期型比分候选，已忽略 candidate=%s score=%s", candidate, score)
+                continue
+            return score, candidate
+
+        return None, None
+
+    def _log_score_debug(self, cells: list[str], score_candidate: str | None, score: str | None) -> None:
+        if self._debug_sample_count >= 3:
+            return
+        raw_row = " | ".join(cells)
+        logger.info(
+            "赛果调试样本[%s] raw_row=%s score_candidate=%s parsed_full_time_score=%s",
+            self._debug_sample_count + 1,
+            raw_row,
+            score_candidate,
+            score,
+        )
+        self._debug_sample_count += 1
+
     def _parse_row(self, cells: list[str], issue_date_hint: str | None = None) -> dict[str, str | None] | None:
         if len(cells) < 4:
             return None
 
-        score = None
-        for cell in cells:
-            m = re.search(r"\d{1,2}\s*[-:：]\s*\d{1,2}", cell)
-            if m:
-                score = m.group(0).replace("：", "-").replace(":", "-")
-                break
+        score, score_candidate = self._extract_score_from_cells(cells)
+        self._log_score_debug(cells, score_candidate, score)
         if not score:
             return None
 
@@ -130,11 +194,9 @@ class ResultFetcher:
 
     def _build_row_from_json_item(self, item: dict[str, Any]) -> dict[str, str | None] | None:
         text_dump = json.dumps(item, ensure_ascii=False)
-        m_score = re.search(r"\d{1,2}\s*[-:：]\s*\d{1,2}", text_dump)
-        if not m_score:
+        score = self._extract_score_from_json_item(item)
+        if not score:
             return None
-
-        score = m_score.group(0).replace("：", "-").replace(":", "-")
         match_no = None
         for key in ["matchNo", "match_no", "weekdayNo", "matchNumStr"]:
             v = item.get(key)
@@ -164,6 +226,46 @@ class ResultFetcher:
             "result_generated_at": datetime.now(timezone.utc).isoformat(),
             "raw_id": str(item.get("id") or item.get("matchId") or "") or None,
         }
+
+    def _extract_score_from_json_item(self, item: dict[str, Any]) -> str | None:
+        score_keys = [
+            "score",
+            "fullScore",
+            "full_time_score",
+            "resultScore",
+            "matchScore",
+            "spfResult",
+            "bfResult",
+        ]
+        for key in score_keys:
+            value = item.get(key)
+            if value is None:
+                continue
+            source_text = str(value)
+            score = self._normalize_score(source_text)
+            if not score:
+                continue
+            if self._looks_like_date_fragment(score, source_text):
+                logger.warning("JSON 中识别到日期型比分候选，已忽略 key=%s value=%s", key, source_text)
+                continue
+            return score
+
+        # 仅在“键名语义明确”的字段中做候选匹配，避免对整段 JSON 文本盲猜。
+        for key, value in item.items():
+            if not isinstance(value, str):
+                continue
+            key_lower = str(key).lower()
+            if not any(flag in key_lower for flag in ["score", "result", "bf", "bifen"]):
+                continue
+            score = self._normalize_score(value)
+            if not score:
+                continue
+            if self._looks_like_date_fragment(score, value):
+                logger.warning("JSON 模糊字段识别到日期型比分候选，已忽略 key=%s value=%s", key, value)
+                continue
+            return score
+
+        return None
 
     def _extract_rows_from_json(self, data: Any) -> list[dict[str, str | None]]:
         rows: list[dict[str, str | None]] = []
