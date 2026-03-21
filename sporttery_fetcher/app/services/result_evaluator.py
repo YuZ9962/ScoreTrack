@@ -3,6 +3,37 @@ from __future__ import annotations
 import pandas as pd
 
 
+def _normalize_pick(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _has_secondary_pick(value: object) -> bool:
+    v = _normalize_pick(value)
+    return bool(v and v != "无" and v.lower() != "null")
+
+
+def _is_not_started_result(value: object) -> bool:
+    v = _normalize_pick(value)
+    return (not v) or (v == "未开奖")
+
+
+def _judge_hit(real_result: object, main_pick: object, secondary_pick: object) -> str:
+    real = _normalize_pick(real_result)
+    if _is_not_started_result(real):
+        return "未开奖"
+
+    main = _normalize_pick(main_pick)
+    if main and real == main:
+        return "命中"
+
+    if _has_secondary_pick(secondary_pick):
+        secondary = _normalize_pick(secondary_pick)
+        if real == secondary:
+            return "命中"
+
+    return "未命中"
+
+
 
 def _match_row(pred_row: pd.Series, result_df: pd.DataFrame) -> pd.Series | None:
     raw_id = str(pred_row.get("raw_id", "") or "").strip()
@@ -52,13 +83,17 @@ def evaluate_predictions(pred_df: pd.DataFrame, result_df: pd.DataFrame) -> pd.D
         result_handicap = matched.get("result_handicap")
         out.at[i, "final_score"] = final_score
 
-        if pd.notna(result_match) and str(result_match).strip():
-            main_pick = str(row.get("gemini_match_main_pick", "")).strip()
-            out.at[i, "match_hit_result"] = "命中" if main_pick == str(result_match).strip() else "未命中"
+        out.at[i, "match_hit_result"] = _judge_hit(
+            result_match,
+            row.get("gemini_match_main_pick"),
+            row.get("gemini_match_secondary_pick"),
+        )
 
-        if pd.notna(result_handicap) and str(result_handicap).strip():
-            main_pick_h = str(row.get("gemini_handicap_main_pick", "")).strip()
-            out.at[i, "handicap_hit_result"] = "命中" if main_pick_h == str(result_handicap).strip() else "未命中"
+        out.at[i, "handicap_hit_result"] = _judge_hit(
+            result_handicap,
+            row.get("gemini_handicap_main_pick"),
+            row.get("gemini_handicap_secondary_pick"),
+        )
 
     return out
 
@@ -66,21 +101,27 @@ def evaluate_predictions(pred_df: pd.DataFrame, result_df: pd.DataFrame) -> pd.D
 
 def build_hit_summary(eval_df: pd.DataFrame) -> dict[str, str | int]:
     total = len(eval_df)
-    ended = int((eval_df["match_hit_result"] != "未开奖").sum()) if "match_hit_result" in eval_df.columns else 0
+    match_ended = int((eval_df["match_hit_result"] != "未开奖").sum()) if "match_hit_result" in eval_df.columns else 0
+    handicap_ended = (
+        int((eval_df["handicap_hit_result"] != "未开奖").sum()) if "handicap_hit_result" in eval_df.columns else 0
+    )
 
     match_hit = int((eval_df.get("match_hit_result", pd.Series([], dtype="string")) == "命中").sum())
     handicap_hit = int((eval_df.get("handicap_hit_result", pd.Series([], dtype="string")) == "命中").sum())
 
-    if ended > 0:
-        match_rate = f"{match_hit} / {ended}（{(match_hit / ended) * 100:.1f}%）"
-        handicap_rate = f"{handicap_hit} / {ended}（{(handicap_hit / ended) * 100:.1f}%）"
+    if match_ended > 0:
+        match_rate = f"{match_hit} / {match_ended}（{(match_hit / match_ended) * 100:.1f}%）"
     else:
         match_rate = "0 / 0（0.0%）"
+
+    if handicap_ended > 0:
+        handicap_rate = f"{handicap_hit} / {handicap_ended}（{(handicap_hit / handicap_ended) * 100:.1f}%）"
+    else:
         handicap_rate = "0 / 0（0.0%）"
 
     return {
         "total": total,
-        "ended": ended,
+        "ended": match_ended,
         "match_rate": match_rate,
         "handicap_rate": handicap_rate,
     }
