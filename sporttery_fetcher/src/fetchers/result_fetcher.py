@@ -58,36 +58,89 @@ class ResultFetcher:
                     return True
         return False
 
-    def _extract_score_from_cells(self, cells: list[str]) -> tuple[str | None, str | None]:
-        clean_cells = [str(c or "").strip() for c in cells if str(c or "").strip()]
-        if not clean_cells:
-            return None, None
+    def _normalize_header_text(self, text: str) -> str:
+        normalized = re.sub(r"\s+", "", str(text or ""))
+        normalized = normalized.replace("（", "(").replace("）", ")")
+        return normalized
 
-        explicit_candidates: list[str] = []
-        compact_candidates: list[str] = []
-        fallback_candidates: list[str] = []
+    def _resolve_column_indices(self, headers: list[str]) -> dict[str, int | None]:
+        normalized_headers = [self._normalize_header_text(h) for h in headers]
 
-        for cell in clean_cells:
-            lower = cell.lower()
-            if any(k in cell for k in ["比分", "赛果", "开奖"]) and SCORE_PATTERN.search(cell):
-                explicit_candidates.append(cell)
+        def find_index(candidates: list[str], contains: bool = True) -> int | None:
+            for i, h in enumerate(normalized_headers):
+                for c in candidates:
+                    nc = self._normalize_header_text(c)
+                    if contains and nc in h:
+                        return i
+                    if not contains and nc == h:
+                        return i
+            return None
+
+        return {
+            "score": find_index(["全场比分(90分钟)", "全场比分"]),
+            "match_no": find_index(["场次编号", "场次", "编号"]),
+            "league": find_index(["联赛"]),
+            "home_team": find_index(["主队"]),
+            "away_team": find_index(["客队"]),
+            "result_match": find_index(["胜平负"]),
+            "result_handicap": find_index(["让胜平负"]),
+            "issue_date": find_index(["日期", "比赛日期", "开奖日期"]),
+        }
+
+    def _row_value_by_index(self, cells: list[str], idx: int | None) -> str | None:
+        if idx is None or idx < 0 or idx >= len(cells):
+            return None
+        value = str(cells[idx] or "").strip()
+        return value or None
+
+    def _parse_table_rows(
+        self, table: Any, score_col_idx: int, col_map: dict[str, int | None], issue_date_hint: str | None = None
+    ) -> list[dict[str, str | None]]:
+        rows: list[dict[str, str | None]] = []
+        debug_count = 0
+        trs = table.select("tr")
+        for tr in trs:
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+            if not cells:
                 continue
-            if SCORE_PATTERN.fullmatch(cell):
-                compact_candidates.append(cell)
+            if tr.find_all("th"):
                 continue
-            if SCORE_PATTERN.search(cell) and not DATE_PATTERN.search(cell):
-                fallback_candidates.append(cell)
+            if score_col_idx >= len(cells):
+                continue
 
-        for candidate in [*explicit_candidates, *compact_candidates, *fallback_candidates]:
-            score = self._normalize_score(candidate)
+            score_candidate = self._row_value_by_index(cells, score_col_idx)
+            score = self._normalize_score(score_candidate)
+            if score and score_candidate and self._looks_like_date_fragment(score, score_candidate):
+                logger.warning("识别到日期型比分候选，已忽略 candidate=%s score=%s", score_candidate, score)
+                score = None
             if not score:
                 continue
-            if self._looks_like_date_fragment(score, candidate):
-                logger.warning("识别到日期型比分候选，已忽略 candidate=%s score=%s", candidate, score)
-                continue
-            return score, candidate
 
-        return None, None
+            if debug_count < 3:
+                self._log_score_debug(cells, score_candidate, score)
+                debug_count += 1
+
+            issue_date = self._row_value_by_index(cells, col_map.get("issue_date")) or issue_date_hint
+            if issue_date and re.match(r"\d{4}-\d{2}-\d{2}", issue_date):
+                issue_date = issue_date[:10]
+
+            row = {
+                "issue_date": issue_date,
+                "match_no": self._row_value_by_index(cells, col_map.get("match_no")),
+                "league": self._row_value_by_index(cells, col_map.get("league")),
+                "home_team": self._row_value_by_index(cells, col_map.get("home_team")),
+                "away_team": self._row_value_by_index(cells, col_map.get("away_team")),
+                "kickoff_time": None,
+                "full_time_score": score,
+                "result_match": self._row_value_by_index(cells, col_map.get("result_match")) or self._parse_outcome(score),
+                "result_handicap": self._row_value_by_index(cells, col_map.get("result_handicap")),
+                "raw_result_text": " | ".join(cells),
+                "result_generated_at": datetime.now(timezone.utc).isoformat(),
+                "raw_id": None,
+            }
+            rows.append(row)
+
+        return rows
 
     def _log_score_debug(self, cells: list[str], score_candidate: str | None, score: str | None) -> None:
         if self._debug_sample_count >= 3:
@@ -102,52 +155,6 @@ class ResultFetcher:
         )
         self._debug_sample_count += 1
 
-    def _parse_row(self, cells: list[str], issue_date_hint: str | None = None) -> dict[str, str | None] | None:
-        if len(cells) < 4:
-            return None
-
-        score, score_candidate = self._extract_score_from_cells(cells)
-        self._log_score_debug(cells, score_candidate, score)
-        if not score:
-            return None
-
-        match_no = next((c for c in cells if re.search(r"周[一二三四五六日天]\d{3}", c)), None)
-        league = next((c for c in cells if len(c) <= 16 and any(x in c for x in ["联赛", "杯", "甲", "超"])) , None)
-
-        teams = None
-        for c in cells:
-            if re.search(r"\bvs\b|\bVS\b|对|[-—]", c) and not re.search(r"\d{1,2}\s*[-:：]\s*\d{1,2}", c):
-                teams = c
-                break
-
-        home_team, away_team = None, None
-        if teams:
-            parts = re.split(r"\s+vs\s+|\s+VS\s+|\s*[-—]\s*|\s*对\s*", teams)
-            if len(parts) >= 2:
-                home_team, away_team = parts[0].strip(), parts[1].strip()
-
-        issue_date = issue_date_hint
-        for c in cells:
-            if re.match(r"\d{4}-\d{2}-\d{2}", c):
-                issue_date = c[:10]
-                break
-
-        outcome = self._parse_outcome(score)
-        return {
-            "issue_date": issue_date,
-            "match_no": match_no,
-            "league": league,
-            "home_team": home_team,
-            "away_team": away_team,
-            "kickoff_time": None,
-            "full_time_score": score,
-            "result_match": outcome,
-            "result_handicap": None,
-            "raw_result_text": " | ".join(cells),
-            "result_generated_at": datetime.now(timezone.utc).isoformat(),
-            "raw_id": None,
-        }
-
     def _keyword_hits(self, text: str) -> dict[str, bool]:
         return {k: (k in text) for k in KEYWORDS}
 
@@ -160,35 +167,40 @@ class ResultFetcher:
         logger.info("赛果页面快照已保存: %s", path)
         return path
 
-    def _parse_html(self, html_text: str) -> tuple[list[dict[str, str | None]], int]:
+    def _parse_html(self, html_text: str, source_label: str = "static") -> tuple[list[dict[str, str | None]], int]:
         rows: list[dict[str, str | None]] = []
         soup = BeautifulSoup(html_text, "lxml")
+        tables = soup.select("table")
+        candidate_count = len(tables)
+        logger.info("HTML 解析候选 table=%s source=%s", candidate_count, source_label)
 
-        candidate_trs = soup.select("table tr")
-        candidate_count = len(candidate_trs)
-        logger.info("HTML 解析候选节点 table tr=%s", candidate_count)
+        for idx, table in enumerate(tables, start=1):
+            header_cells = table.select("tr th")
+            headers = [h.get_text(" ", strip=True) for h in header_cells]
+            if not headers:
+                first_tr = table.select_one("tr")
+                if first_tr:
+                    headers = [c.get_text(" ", strip=True) for c in first_tr.find_all(["th", "td"])]
 
-        if not candidate_trs:
-            candidate_trs = soup.select("tr")
-            candidate_count = len(candidate_trs)
-            logger.info("HTML 解析候选节点 tr=%s", candidate_count)
+            if not headers:
+                continue
 
-        for tr in candidate_trs:
-            tds = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
-            parsed = self._parse_row(tds)
-            if parsed:
-                rows.append(parsed)
+            logger.info("赛果表格[%s]表头=%s", idx, headers)
+            col_map = self._resolve_column_indices(headers)
+            score_col_idx = col_map.get("score")
+            logger.info("赛果表格[%s] “全场比分（90分钟）”列索引=%s", idx, score_col_idx)
 
-        # fallback: 非表格结构节点
-        if not rows:
-            candidates = soup.find_all(text=re.compile(r"周[一二三四五六日天]\d{3}"))
-            logger.info("HTML 非表格候选文本节点=%s", len(candidates))
-            for node in candidates:
-                block = node.parent.get_text(" ", strip=True) if node.parent else str(node)
-                cells = re.split(r"\s{2,}|\|", block)
-                parsed = self._parse_row([c.strip() for c in cells if c.strip()])
-                if parsed:
-                    rows.append(parsed)
+            if score_col_idx is None:
+                continue
+
+            table_rows = self._parse_table_rows(table, score_col_idx=score_col_idx, col_map=col_map)
+            if table_rows:
+                rows.extend(table_rows)
+                break
+
+        if not rows and tables:
+            logger.warning("未找到列：全场比分（90分钟）")
+            self._save_snapshot(html_text, prefix=f"result_missing_score_col_{source_label}")
 
         return rows, candidate_count
 
@@ -284,6 +296,29 @@ class ResultFetcher:
         walk(data)
         return rows
 
+    def _fetch_with_playwright_html(self, page_url: str) -> str | None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            logger.warning("Playwright 不可用，无法进行动态渲染")
+            return None
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=settings.playwright_headless)
+            context = browser.new_context(user_agent=settings.user_agent)
+            page = context.new_page()
+            try:
+                page.goto(page_url, wait_until="networkidle", timeout=settings.request_timeout * 1000)
+                html = page.content()
+                logger.info("Playwright 页面源码长度=%s 关键字命中=%s", len(html), self._keyword_hits(html))
+                self._save_snapshot(html, prefix="result_playwright")
+                return html
+            except Exception as exc:
+                logger.warning("Playwright 渲染失败 URL=%s err=%s", page_url, type(exc).__name__)
+                return None
+            finally:
+                browser.close()
+
     def _detect_api_rows(self, page_url: str) -> tuple[list[dict[str, str | None]], int]:
         try:
             from playwright.sync_api import sync_playwright
@@ -333,9 +368,6 @@ class ResultFetcher:
 
             page.on("response", on_response)
             page.goto(page_url, wait_until="networkidle", timeout=settings.request_timeout * 1000)
-            html = page.content()
-            logger.info("Playwright 页面源码长度=%s 关键字命中=%s", len(html), self._keyword_hits(html))
-            self._save_snapshot(html, prefix="result_playwright")
             browser.close()
 
         logger.info("XHR/JSON 候选请求数=%s", len(candidates))
@@ -358,11 +390,19 @@ class ResultFetcher:
                 logger.warning("赛果请求失败 URL=%s err=%s", url, type(exc).__name__)
 
             if html_text:
-                parsed_rows, candidate_count = self._parse_html(html_text)
+                parsed_rows, candidate_count = self._parse_html(html_text, source_label="static")
                 logger.info("静态 HTML 候选节点数=%s 解析条数=%s", candidate_count, len(parsed_rows))
                 rows.extend(parsed_rows)
 
-            # 优先接口探测
+            # Playwright 回退：渲染后依旧按表头列定位解析，不做整行正则猜测
+            if not rows:
+                pw_html = self._fetch_with_playwright_html(url)
+                if pw_html:
+                    pw_rows, pw_candidate_count = self._parse_html(pw_html, source_label="playwright")
+                    logger.info("Playwright HTML 候选节点数=%s 解析条数=%s", pw_candidate_count, len(pw_rows))
+                    rows.extend(pw_rows)
+
+            # 接口探测兜底
             if not rows:
                 api_rows, api_candidate_count = self._detect_api_rows(url)
                 logger.info("接口探测候选数=%s 解析条数=%s", api_candidate_count, len(api_rows))

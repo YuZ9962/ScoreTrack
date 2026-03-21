@@ -120,9 +120,7 @@ if st.button("更新比赛结果"):
         try:
             result = fetch_and_save_results(ROOT)
             if result.get("ok"):
-                st.success(
-                    f"赛果更新完成：{result.get('path')} | 解析 {result.get('parsed_rows')} 条 | 写入 {result.get('written_rows')} 条 | 匹配预测 {result.get('matched_predictions')} 条"
-                )
+                st.success(f"赛果更新完成，共更新 {result.get('parsed_rows')} 场")
             else:
                 st.warning("未抓取到赛果，请检查开奖页解析逻辑")
         except Exception:
