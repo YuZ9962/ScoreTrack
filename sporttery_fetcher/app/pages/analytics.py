@@ -10,16 +10,20 @@ APP_DIR = Path(__file__).resolve().parents[1]
 ROOT = APP_DIR.parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from components.data_controls import render_fetch_section
-from services.loader import get_data_context, load_all_matches
+from services.loader import get_data_context, load_all_matches, load_results
 from services.prediction_store import load_predictions
+from services.result_evaluator import build_hit_summary, evaluate_predictions
 from services.transforms import (
     ensure_issue_date_columns,
     filter_by_time_and_league,
     normalize_dataframe,
     sort_by_match_no,
 )
+from src.fetchers.result_fetcher import fetch_and_save_results
 
 TIME_MODES = ["按日", "按月", "按年"]
 
@@ -84,8 +88,25 @@ def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: _join_main_secondary(r.get("gemini_handicap_main_pick"), r.get("gemini_handicap_secondary_pick")), axis=1
     )
     out["推荐比分"] = out.apply(lambda r: _join_scores(r.get("gemini_score_1"), r.get("gemini_score_2")), axis=1)
+    out["比赛实际比分"] = out.get("final_score")
+    out["胜平负预测结果"] = out.get("match_hit_result")
+    out["让胜平负预测结果"] = out.get("handicap_hit_result")
 
-    return out[["日期时间", "比赛序号", "联赛", "主客队", "让球", "胜平负", "让胜平负", "推荐比分"]]
+    return out[
+        [
+            "日期时间",
+            "比赛序号",
+            "联赛",
+            "主客队",
+            "让球",
+            "胜平负",
+            "让胜平负",
+            "推荐比分",
+            "比赛实际比分",
+            "胜平负预测结果",
+            "让胜平负预测结果",
+        ]
+    ]
 
 
 st.set_page_config(page_title="统计分析", page_icon="📈", layout="wide")
@@ -93,6 +114,14 @@ st.title("📈 统计分析")
 
 ctx = get_data_context(ROOT)
 render_fetch_section(ROOT)
+
+if st.button("更新比赛结果"):
+    with st.spinner("正在抓取官方赛果并更新..."):
+        try:
+            path = fetch_and_save_results(ROOT)
+            st.success(f"赛果更新完成：{path}")
+        except Exception:
+            st.error("更新比赛结果失败，请稍后重试")
 
 match_df = load_all_matches(ctx)
 match_df = normalize_dataframe(match_df)
@@ -144,7 +173,15 @@ if filtered_preds.empty:
     st.info("当前筛选条件下暂无 Gemini 推荐数据。")
     st.stop()
 
-st.metric("推荐总场次", len(filtered_preds))
+results_df = load_results(ROOT)
+eval_df = evaluate_predictions(filtered_preds, results_df)
+summary = build_hit_summary(eval_df)
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("推荐总场次", summary["total"])
+m2.metric("已结束场次", summary["ended"])
+m3.metric("胜平负预测命中率", summary["match_rate"])
+m4.metric("让胜平负预测命中率", summary["handicap_rate"])
 
 show_cols = [
     "match_no",
@@ -159,12 +196,15 @@ show_cols = [
     "gemini_handicap_secondary_pick",
     "gemini_score_1",
     "gemini_score_2",
+    "final_score",
+    "match_hit_result",
+    "handicap_hit_result",
 ]
 
 for col in show_cols:
-    if col not in filtered_preds.columns:
-        filtered_preds[col] = None
+    if col not in eval_df.columns:
+        eval_df[col] = None
 
-sorted_df = sort_by_match_no(filtered_preds[show_cols].copy())
+sorted_df = sort_by_match_no(eval_df[show_cols].copy())
 display_df = _build_cn_table(sorted_df)
 st.dataframe(display_df, use_container_width=True, hide_index=True)

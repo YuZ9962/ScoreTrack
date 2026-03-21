@@ -68,3 +68,22 @@ def load_all_matches(ctx: DataContext) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+
+def results_file(base_dir: Path | None = None) -> Path:
+    root = base_dir or Path(__file__).resolve().parents[2]
+    path = root / "data" / "results" / "match_results.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+
+def load_results(base_dir: Path | None = None) -> pd.DataFrame:
+    path = results_file(base_dir)
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
