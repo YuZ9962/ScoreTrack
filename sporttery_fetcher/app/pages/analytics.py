@@ -118,8 +118,13 @@ render_fetch_section(ROOT)
 if st.button("更新比赛结果"):
     with st.spinner("正在抓取官方赛果并更新..."):
         try:
-            path = fetch_and_save_results(ROOT)
-            st.success(f"赛果更新完成：{path}")
+            result = fetch_and_save_results(ROOT)
+            if result.get("ok"):
+                st.success(
+                    f"赛果更新完成：{result.get('path')} | 解析 {result.get('parsed_rows')} 条 | 写入 {result.get('written_rows')} 条 | 匹配预测 {result.get('matched_predictions')} 条"
+                )
+            else:
+                st.warning("未抓取到赛果，请检查开奖页解析逻辑")
         except Exception:
             st.error("更新比赛结果失败，请稍后重试")
 
