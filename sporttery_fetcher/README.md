@@ -33,7 +33,7 @@ python -m src.main --date 2026-03-19
 - **Dashboard（首页）**：总览指标、联赛分布、抓取时间。
 - **Matches**：比赛列表、筛选、排序、单场详情。
 - **Match Detail**：单场比赛卡片式详情 + Gemini 预测按钮（显示原始输出 + 结构化结果并落库）。
-- **Analytics**：每日趋势、联赛分布、handicap 分布、赔率摘要 + 按日期查看 Gemini 推荐。
+- **Analytics**：按“日/月/年 + 联赛”统一筛选的分析工作台，包含基础比赛统计与 Gemini 推荐表。
 
 ### 2.2 前端直接抓取
 
@@ -145,16 +145,23 @@ pip install -U -r requirements.txt
 
 去重规则：优先按 `issue_date + raw_id` 覆盖，`raw_id` 缺失时按 `issue_date + match_no + home_team + away_team` 覆盖。
 
-### 3.6 Analytics 的 Gemini 推荐分析
+### 3.6 Analytics 分析工作台（新版）
 
-Analytics 页面新增「Gemini 推荐分析」模块，支持：
+Analytics 页面重构为统一筛选 + 简洁统计：
 
-- 按 `issue_date` 选择日期（默认最新）
-- 联赛筛选
-- 主队/客队关键词筛选
-- 只看有次推的比赛
-- 当天推荐总场次、胜平负主推分布、让球主推分布
-- 表格展示当天所有比赛 + Gemini 推荐结果（含主推/次推）
+- 顶部统一筛选区：
+  - 时间维度：按日 / 按月 / 按年
+  - 时间选择：根据维度动态展示可选值
+  - 联赛筛选：全部联赛或指定联赛
+- 基础分析区：
+  - 每日/每月/每年比赛数（单值 summary）
+  - 当前联赛比赛数（单值 summary）
+- Gemini 推荐分析区：
+  - 仅保留“推荐总场次”
+  - 推荐表格按 `match_no` 升序排序
+  - 表格字段保留主推/次推、比分、摘要、生成时间
+
+说明：原有三个柱状图（每日比赛数、按联赛统计、handicap 分布）和两个赔率分布表已移除。
 
 ---
 

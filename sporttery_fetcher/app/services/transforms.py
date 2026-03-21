@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import re
+from typing import Literal
+
 import pandas as pd
+
+TimeMode = Literal["按日", "按月", "按年"]
+
 
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -25,6 +31,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         out["handicap"] = out["handicap"].astype("string")
 
     return out
+
 
 
 def apply_filters(
@@ -55,6 +62,7 @@ def apply_filters(
     return out
 
 
+
 def sort_matches(df: pd.DataFrame, sort_by: str, ascending: bool = True) -> pd.DataFrame:
     mapping = {
         "开赛时间": "kickoff_time",
@@ -65,3 +73,54 @@ def sort_matches(df: pd.DataFrame, sort_by: str, ascending: bool = True) -> pd.D
     if col not in df.columns:
         return df
     return df.sort_values(by=col, ascending=ascending, na_position="last")
+
+
+
+def ensure_issue_date_columns(df: pd.DataFrame, source_col: str = "issue_date") -> pd.DataFrame:
+    out = df.copy()
+    if source_col not in out.columns:
+        out[source_col] = None
+
+    base = pd.to_datetime(out[source_col], errors="coerce")
+    if "kickoff_time" in out.columns:
+        kickoff = pd.to_datetime(out["kickoff_time"], errors="coerce")
+        base = base.fillna(kickoff)
+
+    out["_date"] = base.dt.strftime("%Y-%m-%d")
+    out["_month"] = base.dt.strftime("%Y-%m")
+    out["_year"] = base.dt.strftime("%Y")
+    return out
+
+
+
+def filter_by_time_and_league(df: pd.DataFrame, time_mode: TimeMode, time_value: str, league: str) -> pd.DataFrame:
+    out = df.copy()
+
+    col_map = {"按日": "_date", "按月": "_month", "按年": "_year"}
+    target_col = col_map[time_mode]
+    if target_col in out.columns and time_value:
+        out = out[out[target_col].astype(str) == str(time_value)]
+
+    if league != "全部联赛" and "league" in out.columns:
+        out = out[out["league"].fillna("").astype(str) == league]
+
+    return out
+
+
+
+def parse_match_no_sort_key(match_no: str) -> tuple[str, int, str]:
+    text = str(match_no or "")
+    m = re.search(r"([0-9]{1,3})", text)
+    number = int(m.group(1)) if m else 10**9
+    prefix = text[: m.start()] if m else text
+    return (prefix, number, text)
+
+
+
+def sort_by_match_no(df: pd.DataFrame) -> pd.DataFrame:
+    if "match_no" not in df.columns:
+        return df
+    out = df.copy()
+    out["_match_sort_key"] = out["match_no"].map(parse_match_no_sort_key)
+    out = out.sort_values(by="_match_sort_key", ascending=True, na_position="last")
+    return out.drop(columns=["_match_sort_key"])
