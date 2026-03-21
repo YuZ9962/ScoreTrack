@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
+
 
 
 def render_match_detail(match: pd.Series) -> None:
@@ -27,9 +28,3 @@ def render_match_detail(match: pd.Series) -> None:
     r1.metric("让胜", value=match.get("rqspf_win", "-"))
     r2.metric("让平", value=match.get("rqspf_draw", "-"))
     r3.metric("让负", value=match.get("rqspf_lose", "-"))
-
-    st.subheader("原始抓取信息")
-    st.write(f"**sell_status**：{match.get('sell_status', '-')}")
-    st.write(f"**source_url**：{match.get('source_url', '-')}")
-    st.write(f"**raw_id**：{match.get('raw_id', '-')}")
-    st.write(f"**scrape_time**：{match.get('scrape_time', '-')}")

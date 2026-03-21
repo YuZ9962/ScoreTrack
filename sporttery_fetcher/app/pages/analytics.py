@@ -21,7 +21,6 @@ from services.transforms import (
     sort_by_match_no,
 )
 
-
 TIME_MODES = ["按日", "按月", "按年"]
 
 
@@ -48,6 +47,45 @@ def _collect_leagues(match_df: pd.DataFrame, pred_df: pd.DataFrame) -> list[str]
     merged = pd.concat(series_list, ignore_index=True)
     leagues = sorted([x for x in merged.unique().tolist() if x.strip()])
     return ["全部联赛", *leagues]
+
+
+
+def _join_main_secondary(main_pick: object, secondary_pick: object) -> str:
+    main = str(main_pick or "").strip()
+    secondary = str(secondary_pick or "").strip()
+    if not main:
+        return ""
+    if not secondary or secondary == "无":
+        return main
+    return f"{main}/{secondary}"
+
+
+
+def _join_scores(score_1: object, score_2: object) -> str:
+    s1 = str(score_1 or "").strip()
+    s2 = str(score_2 or "").strip()
+    if s1 and s2:
+        return f"{s1}/{s2}"
+    return s1 or s2
+
+
+
+def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["日期时间"] = pd.to_datetime(out.get("kickoff_time"), errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    out["比赛序号"] = out.get("match_no")
+    out["联赛"] = out.get("league")
+    out["主客队"] = out.get("home_team", "").astype(str) + " vs " + out.get("away_team", "").astype(str)
+    out["让球"] = out.get("handicap")
+    out["胜平负"] = out.apply(
+        lambda r: _join_main_secondary(r.get("gemini_match_main_pick"), r.get("gemini_match_secondary_pick")), axis=1
+    )
+    out["让胜平负"] = out.apply(
+        lambda r: _join_main_secondary(r.get("gemini_handicap_main_pick"), r.get("gemini_handicap_secondary_pick")), axis=1
+    )
+    out["推荐比分"] = out.apply(lambda r: _join_scores(r.get("gemini_score_1"), r.get("gemini_score_2")), axis=1)
+
+    return out[["日期时间", "比赛序号", "联赛", "主客队", "让球", "胜平负", "让胜平负", "推荐比分"]]
 
 
 st.set_page_config(page_title="统计分析", page_icon="📈", layout="wide")
@@ -109,7 +147,6 @@ if filtered_preds.empty:
 st.metric("推荐总场次", len(filtered_preds))
 
 show_cols = [
-    "issue_date",
     "match_no",
     "league",
     "home_team",
@@ -122,17 +159,12 @@ show_cols = [
     "gemini_handicap_secondary_pick",
     "gemini_score_1",
     "gemini_score_2",
-    "gemini_summary",
-    "gemini_generated_at",
 ]
 
 for col in show_cols:
     if col not in filtered_preds.columns:
         filtered_preds[col] = None
 
-display_df = sort_by_match_no(filtered_preds[show_cols].copy())
-if "kickoff_time" in display_df.columns:
-    display_df["kickoff_time"] = pd.to_datetime(display_df["kickoff_time"], errors="coerce")
-    display_df["kickoff_time"] = display_df["kickoff_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
-
+sorted_df = sort_by_match_no(filtered_preds[show_cols].copy())
+display_df = _build_cn_table(sorted_df)
 st.dataframe(display_df, use_container_width=True, hide_index=True)
