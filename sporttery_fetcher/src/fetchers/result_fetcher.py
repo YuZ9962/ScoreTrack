@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import re
+from typing import Any
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -13,6 +15,8 @@ from src.utils.http import HTTPClient
 from src.utils.logger import get_logger
 
 logger = get_logger("result_fetcher")
+
+KEYWORDS = ["周四", "比分", "开奖", "主队", "客队"]
 
 
 @dataclass
@@ -31,7 +35,7 @@ class ResultFetcher:
         return "客胜"
 
     def _parse_row(self, cells: list[str], issue_date_hint: str | None = None) -> dict[str, str | None] | None:
-        if len(cells) < 6:
+        if len(cells) < 4:
             return None
 
         score = None
@@ -44,13 +48,11 @@ class ResultFetcher:
             return None
 
         match_no = next((c for c in cells if re.search(r"周[一二三四五六日天]\d{3}", c)), None)
-        league = cells[2] if len(cells) > 2 else None
+        league = next((c for c in cells if len(c) <= 16 and any(x in c for x in ["联赛", "杯", "甲", "超"])) , None)
 
         teams = None
         for c in cells:
-            if "vs" in c.lower() or "-" in c or "对" in c:
-                if re.search(r"\d{1,2}\s*[-:：]\s*\d{1,2}", c):
-                    continue
+            if re.search(r"\bvs\b|\bVS\b|对|[-—]", c) and not re.search(r"\d{1,2}\s*[-:：]\s*\d{1,2}", c):
                 teams = c
                 break
 
@@ -67,7 +69,6 @@ class ResultFetcher:
                 break
 
         outcome = self._parse_outcome(score)
-
         return {
             "issue_date": issue_date,
             "match_no": match_no,
@@ -83,40 +84,160 @@ class ResultFetcher:
             "raw_id": None,
         }
 
-    def _parse_html(self, html_text: str) -> list[dict[str, str | None]]:
+    def _keyword_hits(self, text: str) -> dict[str, bool]:
+        return {k: (k in text) for k in KEYWORDS}
+
+    def _save_snapshot(self, html_text: str, prefix: str = "result") -> Path:
+        snap_dir = settings.snapshots_dir / "results"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = snap_dir / f"{prefix}_{ts}.html"
+        path.write_text(html_text, encoding="utf-8")
+        logger.info("赛果页面快照已保存: %s", path)
+        return path
+
+    def _parse_html(self, html_text: str) -> tuple[list[dict[str, str | None]], int]:
         rows: list[dict[str, str | None]] = []
         soup = BeautifulSoup(html_text, "lxml")
-        trs = soup.select("table tr")
-        if not trs:
-            trs = soup.select("tr")
 
-        for tr in trs:
+        candidate_trs = soup.select("table tr")
+        candidate_count = len(candidate_trs)
+        logger.info("HTML 解析候选节点 table tr=%s", candidate_count)
+
+        if not candidate_trs:
+            candidate_trs = soup.select("tr")
+            candidate_count = len(candidate_trs)
+            logger.info("HTML 解析候选节点 tr=%s", candidate_count)
+
+        for tr in candidate_trs:
             tds = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
             parsed = self._parse_row(tds)
             if parsed:
                 rows.append(parsed)
 
+        # fallback: 非表格结构节点
+        if not rows:
+            candidates = soup.find_all(text=re.compile(r"周[一二三四五六日天]\d{3}"))
+            logger.info("HTML 非表格候选文本节点=%s", len(candidates))
+            for node in candidates:
+                block = node.parent.get_text(" ", strip=True) if node.parent else str(node)
+                cells = re.split(r"\s{2,}|\|", block)
+                parsed = self._parse_row([c.strip() for c in cells if c.strip()])
+                if parsed:
+                    rows.append(parsed)
+
+        return rows, candidate_count
+
+    def _build_row_from_json_item(self, item: dict[str, Any]) -> dict[str, str | None] | None:
+        text_dump = json.dumps(item, ensure_ascii=False)
+        m_score = re.search(r"\d{1,2}\s*[-:：]\s*\d{1,2}", text_dump)
+        if not m_score:
+            return None
+
+        score = m_score.group(0).replace("：", "-").replace(":", "-")
+        match_no = None
+        for key in ["matchNo", "match_no", "weekdayNo", "matchNumStr"]:
+            v = item.get(key)
+            if v:
+                match_no = str(v)
+                break
+        if not match_no:
+            m = re.search(r"周[一二三四五六日天]\d{3}", text_dump)
+            match_no = m.group(0) if m else None
+
+        home_team = next((str(item.get(k)) for k in ["homeTeamName", "homeName", "home_team"] if item.get(k)), None)
+        away_team = next((str(item.get(k)) for k in ["awayTeamName", "awayName", "away_team"] if item.get(k)), None)
+        league = next((str(item.get(k)) for k in ["leagueName", "league", "matchName"] if item.get(k)), None)
+        issue_date = next((str(item.get(k))[:10] for k in ["issueDate", "matchDate", "saleDate"] if item.get(k)), None)
+
+        return {
+            "issue_date": issue_date,
+            "match_no": match_no,
+            "league": league,
+            "home_team": home_team,
+            "away_team": away_team,
+            "kickoff_time": None,
+            "full_time_score": score,
+            "result_match": self._parse_outcome(score),
+            "result_handicap": None,
+            "raw_result_text": text_dump[:800],
+            "result_generated_at": datetime.now(timezone.utc).isoformat(),
+            "raw_id": str(item.get("id") or item.get("matchId") or "") or None,
+        }
+
+    def _extract_rows_from_json(self, data: Any) -> list[dict[str, str | None]]:
+        rows: list[dict[str, str | None]] = []
+
+        def walk(obj: Any):
+            if isinstance(obj, dict):
+                row = self._build_row_from_json_item(obj)
+                if row:
+                    rows.append(row)
+                for v in obj.values():
+                    walk(v)
+            elif isinstance(obj, list):
+                for x in obj:
+                    walk(x)
+
+        walk(data)
         return rows
 
-    def _fetch_with_playwright(self, url: str) -> str | None:
+    def _detect_api_rows(self, page_url: str) -> tuple[list[dict[str, str | None]], int]:
         try:
             from playwright.sync_api import sync_playwright
         except Exception:
-            logger.warning("Playwright 不可用，跳过动态渲染回退")
-            return None
+            logger.warning("Playwright 不可用，无法进行 XHR/JSON 探测")
+            return [], 0
 
-        logger.info("赛果抓取 Playwright 回退 URL=%s", url)
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=settings.playwright_headless)
-                page = browser.new_page()
-                page.goto(url, wait_until="networkidle", timeout=settings.request_timeout * 1000)
-                html = page.content()
-                browser.close()
-                return html
-        except Exception as exc:
-            logger.warning("Playwright 回退抓取失败: %s", type(exc).__name__)
-            return None
+        candidates: list[dict[str, Any]] = []
+        rows: list[dict[str, str | None]] = []
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=settings.playwright_headless)
+            context = browser.new_context(user_agent=settings.user_agent)
+            page = context.new_page()
+
+            def on_response(resp):
+                req = resp.request
+                rtype = req.resource_type
+                ctype = resp.headers.get("content-type", "").lower()
+                if rtype not in {"xhr", "fetch"} and "json" not in ctype:
+                    return
+                url = resp.url
+                if "sporttery" not in url:
+                    return
+                try:
+                    body = resp.text()
+                except Exception:
+                    return
+
+                item = {
+                    "url": url,
+                    "method": req.method,
+                    "rtype": rtype,
+                    "ctype": ctype,
+                    "body_len": len(body),
+                }
+                candidates.append(item)
+
+                try:
+                    data = json.loads(body)
+                except Exception:
+                    return
+                api_rows = self._extract_rows_from_json(data)
+                if api_rows:
+                    logger.info("接口命中赛果数据 URL=%s rows=%s", url, len(api_rows))
+                    rows.extend(api_rows)
+
+            page.on("response", on_response)
+            page.goto(page_url, wait_until="networkidle", timeout=settings.request_timeout * 1000)
+            html = page.content()
+            logger.info("Playwright 页面源码长度=%s 关键字命中=%s", len(html), self._keyword_hits(html))
+            self._save_snapshot(html, prefix="result_playwright")
+            browser.close()
+
+        logger.info("XHR/JSON 候选请求数=%s", len(candidates))
+        return rows, len(candidates)
 
     def fetch_results(self) -> tuple[list[dict[str, str | None]], int]:
         rows: list[dict[str, str | None]] = []
@@ -130,20 +251,23 @@ class ResultFetcher:
             try:
                 resp = self.client.request("GET", url)
                 html_text = resp.text
+                logger.info("静态页面源码长度=%s 关键字命中=%s", len(html_text), self._keyword_hits(html_text))
             except Exception as exc:
                 logger.warning("赛果请求失败 URL=%s err=%s", url, type(exc).__name__)
 
             if html_text:
-                parsed_rows = self._parse_html(html_text)
-                logger.info("赛果解析条数 URL=%s rows=%s", url, len(parsed_rows))
+                parsed_rows, candidate_count = self._parse_html(html_text)
+                logger.info("静态 HTML 候选节点数=%s 解析条数=%s", candidate_count, len(parsed_rows))
                 rows.extend(parsed_rows)
 
+            # 优先接口探测
             if not rows:
-                pw_html = self._fetch_with_playwright(url)
-                if pw_html:
-                    parsed_rows = self._parse_html(pw_html)
-                    logger.info("Playwright 赛果解析条数 URL=%s rows=%s", url, len(parsed_rows))
-                    rows.extend(parsed_rows)
+                api_rows, api_candidate_count = self._detect_api_rows(url)
+                logger.info("接口探测候选数=%s 解析条数=%s", api_candidate_count, len(api_rows))
+                rows.extend(api_rows)
+
+            if not rows and html_text:
+                self._save_snapshot(html_text, prefix="result_static")
 
             if rows:
                 break
