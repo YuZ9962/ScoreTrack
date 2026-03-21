@@ -182,9 +182,27 @@ def _render_single_result(result: dict[str, object]) -> None:
 def render_manual_dialog(match_row: pd.Series, issue_date: str):
     st.caption(_match_label(match_row))
 
-    main_pick = st.selectbox("胜平负", ["主胜", "平", "客胜"], key=f"manual_main_{match_row.name}")
-    handicap_pick = st.selectbox("让球胜平负", ["让胜", "让平", "让负"], key=f"manual_hcap_{match_row.name}")
-    score_text = st.text_input("推荐比分", value="", placeholder="如：2-1 / 1-0", key=f"manual_score_{match_row.name}")
+    st.markdown("**胜平负推荐**")
+    c1, c2 = st.columns(2)
+    with c1:
+        main_pick = st.selectbox("胜平负主推", ["主胜", "平", "客胜"], key=f"manual_main_{match_row.name}")
+    with c2:
+        secondary_pick = st.selectbox("胜平负次推（选填）", ["无", "主胜", "平", "客胜"], index=0, key=f"manual_secondary_{match_row.name}")
+
+    st.markdown("**让胜平负推荐**")
+    c3, c4 = st.columns(2)
+    with c3:
+        handicap_pick = st.selectbox("让胜平负主推", ["让胜", "让平", "让负"], key=f"manual_hcap_{match_row.name}")
+    with c4:
+        handicap_secondary_pick = st.selectbox("让胜平负次推（选填）", ["无", "让胜", "让平", "让负"], index=0, key=f"manual_hcap_secondary_{match_row.name}")
+
+    st.markdown("**推荐比分**")
+    s1, s2 = st.columns(2)
+    with s1:
+        score_1_input = st.text_input("比分1", value="", placeholder="如：2-1", key=f"manual_score1_{match_row.name}")
+    with s2:
+        score_2_input = st.text_input("比分2", value="", placeholder="如：1-0", key=f"manual_score2_{match_row.name}")
+
     analysis = st.text_area("分析内容", value="", height=100, key=f"manual_analysis_{match_row.name}")
     source = st.selectbox("预测来源", [SOURCE_MANUAL_GEMINI, SOURCE_MANUAL_USER], index=0, key=f"manual_source_{match_row.name}")
     remark = st.text_input("备注（可选）", value="", key=f"manual_remark_{match_row.name}")
@@ -199,7 +217,11 @@ def render_manual_dialog(match_row: pd.Series, issue_date: str):
         if parsed.get("handicap_prediction"):
             st.session_state[f"manual_hcap_{match_row.name}"] = parsed["handicap_prediction"]
         if parsed.get("score_prediction"):
-            st.session_state[f"manual_score_{match_row.name}"] = parsed["score_prediction"]
+            scores = [s.strip() for s in str(parsed["score_prediction"]).split("/") if s.strip()]
+            if scores:
+                st.session_state[f"manual_score1_{match_row.name}"] = scores[0]
+            if len(scores) > 1:
+                st.session_state[f"manual_score2_{match_row.name}"] = scores[1]
         if parsed.get("analysis"):
             st.session_state[f"manual_analysis_{match_row.name}"] = parsed["analysis"]
 
@@ -209,9 +231,12 @@ def render_manual_dialog(match_row: pd.Series, issue_date: str):
             st.success("解析成功，已自动回填字段")
 
     if col2.button("保存", type="primary", key=f"save_manual_{match_row.name}"):
-        scores = [s.strip() for s in str(score_text).split("/") if s.strip()]
-        score_1 = scores[0] if scores else None
-        score_2 = scores[1] if len(scores) > 1 else None
+        if secondary_pick == main_pick:
+            st.warning("胜平负主推和次推相同，已自动将次推设为无")
+            secondary_pick = "无"
+        if handicap_secondary_pick == handicap_pick:
+            st.warning("让胜平负主推和次推相同，已自动将次推设为无")
+            handicap_secondary_pick = "无"
 
         row = {
             "issue_date": issue_date,
@@ -226,11 +251,11 @@ def render_manual_dialog(match_row: pd.Series, issue_date: str):
             "gemini_raw_text": raw_text,
             "raw_text": raw_text,
             "gemini_match_main_pick": main_pick,
-            "gemini_match_secondary_pick": "无",
+            "gemini_match_secondary_pick": secondary_pick,
             "gemini_handicap_main_pick": handicap_pick,
-            "gemini_handicap_secondary_pick": "无",
-            "gemini_score_1": score_1,
-            "gemini_score_2": score_2,
+            "gemini_handicap_secondary_pick": handicap_secondary_pick,
+            "gemini_score_1": score_1_input or None,
+            "gemini_score_2": score_2_input or None,
             "gemini_summary": analysis,
             "gemini_model": "manual_input",
             "gemini_thinking_level": None,
