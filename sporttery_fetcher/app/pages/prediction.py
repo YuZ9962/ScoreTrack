@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -12,12 +13,26 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from components.data_controls import render_date_file_selector, render_fetch_section
-from services.gemini_parser import parse_gemini_output
+from services.gemini_parser import parse_gemini_output, parse_manual_raw_text
 from services.gemini_runner import run_gemini_prediction
 from services.loader import get_data_context, load_matches_by_date
 from services.prediction_store import load_predictions, save_prediction
 from services.transforms import normalize_dataframe, sort_by_match_no
 from utils.prompt_builder import build_simple_prediction_prompt
+
+STATUS_SUCCESS = "success"
+STATUS_FAILED = "failed"
+STATUS_MANUAL = "manual_filled"
+STATUS_PENDING = "pending"
+
+SOURCE_AUTO = "auto_gemini"
+SOURCE_MANUAL_GEMINI = "manual_gemini"
+SOURCE_MANUAL_USER = "manual_user"
+
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 
@@ -26,25 +41,55 @@ def _match_label(row: pd.Series) -> str:
 
 
 
-def _prediction_exists(pred_df: pd.DataFrame, issue_date: str, match_row: pd.Series) -> bool:
+def _prediction_mask(pred_df: pd.DataFrame, issue_date: str, match_row: pd.Series) -> pd.Series:
     if pred_df.empty:
-        return False
-
+        return pd.Series([], dtype=bool)
     raw_id = str(match_row.get("raw_id", "") or "").strip()
     if raw_id:
-        mask = (
+        return (
             (pred_df["issue_date"].astype(str) == issue_date)
             & (pred_df["raw_id"].astype(str) == raw_id)
         )
-        return bool(mask.any())
-
-    mask = (
+    return (
         (pred_df["issue_date"].astype(str) == issue_date)
         & (pred_df["match_no"].astype(str) == str(match_row.get("match_no", "")))
         & (pred_df["home_team"].astype(str) == str(match_row.get("home_team", "")))
         & (pred_df["away_team"].astype(str) == str(match_row.get("away_team", "")))
     )
-    return bool(mask.any())
+
+
+
+def _get_prediction_row(pred_df: pd.DataFrame, issue_date: str, match_row: pd.Series) -> pd.Series | None:
+    if pred_df.empty:
+        return None
+    mask = _prediction_mask(pred_df, issue_date, match_row)
+    if mask.empty or not mask.any():
+        return None
+    return pred_df[mask].iloc[-1]
+
+
+
+def _status_text(pred_row: pd.Series | None) -> str:
+    if pred_row is None:
+        return "未预测"
+    status = str(pred_row.get("prediction_status", "") or "")
+    source = str(pred_row.get("prediction_source", "") or "")
+    if status == STATUS_MANUAL:
+        return "手动补录"
+    if status == STATUS_FAILED:
+        return "预测失败"
+    if status == STATUS_SUCCESS and source == SOURCE_AUTO:
+        return "已自动预测"
+    if status == STATUS_PENDING:
+        return "未预测"
+    return "已预测"
+
+
+
+def _is_pending_or_failed(pred_row: pd.Series | None) -> bool:
+    if pred_row is None:
+        return True
+    return str(pred_row.get("prediction_status", "")) in {"", STATUS_FAILED, STATUS_PENDING}
 
 
 
@@ -57,21 +102,7 @@ def _predict_single_match(match: pd.Series, issue_date: str) -> dict[str, object
     )
 
     result = run_gemini_prediction(prompt)
-    if not result.get("ok"):
-        return result
-
-    raw_text = result.get("text", "")
-    parsed = parse_gemini_output(raw_text)
-    structured = {
-        "gemini_prompt": result.get("prompt", prompt),
-        "gemini_raw_text": raw_text,
-        **parsed,
-        "gemini_model": result.get("model"),
-        "gemini_thinking_level": result.get("thinking_level"),
-        "gemini_generated_at": result.get("generated_at"),
-    }
-
-    row = {
+    base_row = {
         "issue_date": issue_date,
         "match_no": match.get("match_no", ""),
         "league": match.get("league", ""),
@@ -80,10 +111,42 @@ def _predict_single_match(match: pd.Series, issue_date: str) -> dict[str, object
         "kickoff_time": match.get("kickoff_time", ""),
         "handicap": match.get("handicap", ""),
         "raw_id": match.get("raw_id", ""),
-        **structured,
+        "prediction_source": SOURCE_AUTO,
+        "is_manual": False,
     }
-    save_prediction(row, ROOT)
 
+    if not result.get("ok"):
+        save_prediction(
+            {
+                **base_row,
+                "gemini_prompt": result.get("prompt", prompt),
+                "gemini_raw_text": result.get("text", ""),
+                "raw_text": result.get("text", ""),
+                "gemini_generated_at": result.get("generated_at", _now_iso()),
+                "prediction_status": STATUS_FAILED,
+                "prediction_remark": result.get("error", "Gemini 请求失败"),
+            },
+            ROOT,
+        )
+        return result
+
+    raw_text = result.get("text", "")
+    parsed = parse_gemini_output(raw_text)
+    structured = {
+        "gemini_prompt": result.get("prompt", prompt),
+        "gemini_raw_text": raw_text,
+        "raw_text": raw_text,
+        **parsed,
+        "gemini_model": result.get("model"),
+        "gemini_thinking_level": result.get("thinking_level"),
+        "gemini_generated_at": result.get("generated_at"),
+        "prediction_source": SOURCE_AUTO,
+        "prediction_status": STATUS_SUCCESS,
+        "is_manual": False,
+        "prediction_remark": None,
+    }
+
+    save_prediction({**base_row, **structured}, ROOT)
     result["structured"] = structured
     return result
 
@@ -113,6 +176,79 @@ def _render_single_result(result: dict[str, object]) -> None:
 
     with st.expander("查看 Gemini 原始回复", expanded=False):
         st.write(str(result.get("text", "")))
+
+
+@st.dialog("手动补录预测")
+def render_manual_dialog(match_row: pd.Series, issue_date: str):
+    st.caption(_match_label(match_row))
+
+    main_pick = st.selectbox("胜平负", ["主胜", "平", "客胜"], key=f"manual_main_{match_row.name}")
+    handicap_pick = st.selectbox("让球胜平负", ["让胜", "让平", "让负"], key=f"manual_hcap_{match_row.name}")
+    score_text = st.text_input("推荐比分", value="", placeholder="如：2-1 / 1-0", key=f"manual_score_{match_row.name}")
+    analysis = st.text_area("分析内容", value="", height=100, key=f"manual_analysis_{match_row.name}")
+    source = st.selectbox("预测来源", [SOURCE_MANUAL_GEMINI, SOURCE_MANUAL_USER], index=0, key=f"manual_source_{match_row.name}")
+    remark = st.text_input("备注（可选）", value="", key=f"manual_remark_{match_row.name}")
+
+    raw_text = st.text_area("raw_gemini_text", value="", height=180, key=f"manual_raw_{match_row.name}")
+
+    col1, col2, col3 = st.columns(3)
+    if col1.button("解析原文", key=f"parse_raw_{match_row.name}"):
+        parsed = parse_manual_raw_text(raw_text)
+        if parsed.get("result_prediction"):
+            st.session_state[f"manual_main_{match_row.name}"] = parsed["result_prediction"]
+        if parsed.get("handicap_prediction"):
+            st.session_state[f"manual_hcap_{match_row.name}"] = parsed["handicap_prediction"]
+        if parsed.get("score_prediction"):
+            st.session_state[f"manual_score_{match_row.name}"] = parsed["score_prediction"]
+        if parsed.get("analysis"):
+            st.session_state[f"manual_analysis_{match_row.name}"] = parsed["analysis"]
+
+        if parsed.get("parse_warning"):
+            st.warning(parsed["parse_warning"])
+        else:
+            st.success("解析成功，已自动回填字段")
+
+    if col2.button("保存", type="primary", key=f"save_manual_{match_row.name}"):
+        scores = [s.strip() for s in str(score_text).split("/") if s.strip()]
+        score_1 = scores[0] if scores else None
+        score_2 = scores[1] if len(scores) > 1 else None
+
+        row = {
+            "issue_date": issue_date,
+            "match_no": match_row.get("match_no", ""),
+            "league": match_row.get("league", ""),
+            "home_team": match_row.get("home_team", ""),
+            "away_team": match_row.get("away_team", ""),
+            "kickoff_time": match_row.get("kickoff_time", ""),
+            "handicap": match_row.get("handicap", ""),
+            "raw_id": match_row.get("raw_id", ""),
+            "gemini_prompt": None,
+            "gemini_raw_text": raw_text,
+            "raw_text": raw_text,
+            "gemini_match_main_pick": main_pick,
+            "gemini_match_secondary_pick": "无",
+            "gemini_handicap_main_pick": handicap_pick,
+            "gemini_handicap_secondary_pick": "无",
+            "gemini_score_1": score_1,
+            "gemini_score_2": score_2,
+            "gemini_summary": analysis,
+            "gemini_model": "manual_input",
+            "gemini_thinking_level": None,
+            "gemini_generated_at": _now_iso(),
+            "prediction_source": source,
+            "prediction_status": STATUS_MANUAL,
+            "is_manual": True,
+            "prediction_remark": remark,
+        }
+        try:
+            save_prediction(row, ROOT)
+            st.success("保存成功")
+            st.rerun()
+        except Exception:
+            st.error("保存失败，请稍后重试")
+
+    if col3.button("取消", key=f"cancel_manual_{match_row.name}"):
+        st.rerun()
 
 
 st.set_page_config(page_title="预测", page_icon="🔮", layout="wide")
@@ -156,6 +292,9 @@ selected_match = filtered_df.iloc[int(selected_index)]
 pred_df = load_predictions(ROOT)
 only_missing = st.checkbox("仅预测尚未生成 Gemini 结果的比赛", value=False)
 
+single_pred = _get_prediction_row(pred_df, selected_date, selected_match)
+st.info(f"当前场次状态：{_status_text(single_pred)}")
+
 st.markdown("---")
 col_a, col_b = st.columns(2)
 
@@ -173,7 +312,7 @@ with col_b:
         target_df = filtered_df.copy()
         if only_missing and not pred_df.empty:
             target_df = target_df[
-                ~target_df.apply(lambda r: _prediction_exists(pred_df, selected_date, r), axis=1)
+                ~target_df.apply(lambda r: _prediction_mask(pred_df, selected_date, r).any(), axis=1)
             ]
 
         total = len(target_df)
@@ -194,6 +333,24 @@ with col_b:
                     else:
                         failed_matches.append(str(row.get("match_no", "")))
                 except Exception:
+                    save_prediction(
+                        {
+                            "issue_date": selected_date,
+                            "match_no": row.get("match_no", ""),
+                            "league": row.get("league", ""),
+                            "home_team": row.get("home_team", ""),
+                            "away_team": row.get("away_team", ""),
+                            "kickoff_time": row.get("kickoff_time", ""),
+                            "handicap": row.get("handicap", ""),
+                            "raw_id": row.get("raw_id", ""),
+                            "prediction_source": SOURCE_AUTO,
+                            "prediction_status": STATUS_FAILED,
+                            "is_manual": False,
+                            "prediction_remark": "批量预测异常",
+                            "gemini_generated_at": _now_iso(),
+                        },
+                        ROOT,
+                    )
                     failed_matches.append(str(row.get("match_no", "")))
 
                 progress.progress(i / total)
@@ -209,9 +366,30 @@ if single_result:
     _render_single_result(single_result)
 
 st.markdown("---")
-st.markdown("### 当日已生成 Gemini 推荐")
+st.markdown("### 待补录场次")
 
 latest_pred_df = load_predictions(ROOT)
+pending_rows: list[pd.Series] = []
+for _, r in filtered_df.iterrows():
+    pred = _get_prediction_row(latest_pred_df, selected_date, r)
+    if _is_pending_or_failed(pred):
+        pending_rows.append(r)
+
+if not pending_rows:
+    st.success("当前筛选下无待补录场次")
+else:
+    st.caption(f"待补录 {len(pending_rows)} 场")
+    for r in pending_rows:
+        pred = _get_prediction_row(latest_pred_df, selected_date, r)
+        with st.container(border=True):
+            st.write(f"**{_match_label(r)}**")
+            st.write(f"状态：{_status_text(pred)}")
+            if st.button("手动补录预测", key=f"manual_btn_{r.get('match_no')}_{r.get('raw_id', '')}"):
+                render_manual_dialog(r, selected_date)
+
+st.markdown("---")
+st.markdown("### 当日已生成 Gemini 推荐")
+
 if latest_pred_df.empty:
     st.info("当前暂无 Gemini 预测记录")
     st.stop()
@@ -237,6 +415,8 @@ show_cols = [
     "gemini_handicap_secondary_pick",
     "gemini_score_1",
     "gemini_score_2",
+    "prediction_source",
+    "prediction_status",
     "gemini_generated_at",
 ]
 

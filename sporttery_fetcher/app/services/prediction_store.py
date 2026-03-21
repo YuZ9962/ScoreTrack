@@ -16,6 +16,7 @@ PREDICTION_COLUMNS = [
     "raw_id",
     "gemini_prompt",
     "gemini_raw_text",
+    "raw_text",
     "gemini_match_main_pick",
     "gemini_match_secondary_pick",
     "gemini_handicap_main_pick",
@@ -26,6 +27,10 @@ PREDICTION_COLUMNS = [
     "gemini_model",
     "gemini_thinking_level",
     "gemini_generated_at",
+    "prediction_source",
+    "prediction_status",
+    "is_manual",
+    "prediction_remark",
 ]
 
 LEGACY_COLUMN_MAPPING = {
@@ -38,10 +43,21 @@ LEGACY_COLUMN_MAPPING = {
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    # 兼容旧字段，自动迁移到新字段命名
     for legacy_col, new_col in LEGACY_COLUMN_MAPPING.items():
         if new_col not in out.columns and legacy_col in out.columns:
             out[new_col] = out[legacy_col]
+
+    if "raw_text" not in out.columns and "gemini_raw_text" in out.columns:
+        out["raw_text"] = out["gemini_raw_text"]
+
+    if "prediction_source" not in out.columns:
+        out["prediction_source"] = "auto_gemini"
+    if "prediction_status" not in out.columns:
+        out["prediction_status"] = "success"
+    if "is_manual" not in out.columns:
+        out["is_manual"] = False
+    if "prediction_remark" not in out.columns:
+        out["prediction_remark"] = None
 
     for col in PREDICTION_COLUMNS:
         if col not in out.columns:
@@ -75,6 +91,8 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     for key in ["issue_date", "match_no", "raw_id", "home_team", "away_team"]:
         value = normalized.get(key)
         normalized[key] = "" if value is None else str(value).strip()
+    if normalized.get("raw_text") in (None, ""):
+        normalized["raw_text"] = normalized.get("gemini_raw_text")
     return normalized
 
 

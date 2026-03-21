@@ -34,7 +34,7 @@ python -m src.main --date 2026-03-19
 - **Matches**：比赛列表、筛选、排序、单场详情。
 - **Match Detail**：单场比赛卡片式详情（仅保留基础信息与奖金信息）。
 - **Analytics**：按“日/月/年 + 联赛”统一筛选的分析工作台，Gemini 推荐表头为中文展示。
-- **Prediction（预测）**：独立预测页，支持单场预测和一键预测当日全部场次。
+- **Prediction（预测）**：独立预测页，支持单场预测、一键预测当日全部场次、失败场次手动补录。
 
 ### 2.2 前端直接抓取
 
@@ -165,6 +165,23 @@ Analytics 页面重构为统一筛选 + 简洁统计：
   - 表格列以中文展示：日期时间、比赛序号、联赛、主客队、让球、胜平负、让胜平负、推荐比分
 
 说明：原有三个柱状图（每日比赛数、按联赛统计、handicap 分布）和两个赔率分布表已移除。
+
+### 3.7 手动补录 Gemini 预测（兜底）
+
+当自动预测失败或未预测时，可在 `Prediction` 页面使用「手动补录预测」：
+
+- 支持两种方式：
+  1. 结构化字段直接填写
+  2. 粘贴 `raw_gemini_text` 后点击「解析原文」自动回填
+- 保存后与自动预测共用同一 `data/predictions/gemini_predictions.csv` 数据源
+- 新增记录字段：
+  - `prediction_source`：`auto_gemini` / `manual_gemini` / `manual_user`
+  - `prediction_status`：`success` / `failed` / `manual_filled` / `pending`
+  - `is_manual`：是否手动补录
+  - `raw_text`：手动粘贴原文
+
+`Prediction` 页面新增「待补录场次」区域，会自动筛出失败或未预测比赛，方便集中处理。
+
 
 ---
 

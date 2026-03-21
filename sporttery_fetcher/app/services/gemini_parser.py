@@ -112,26 +112,22 @@ def parse_gemini_output(raw_text: str) -> dict[str, Any]:
     score_1 = _extract_score(block.get("score_1_raw"))
     score_2 = _extract_score(block.get("score_2_raw"))
 
-    # 若固定格式块缺失或不完整，回退到旧正则逻辑
     if not match_main:
         match_patterns = [
-            (r"(?:推荐|看好|倾向|预测|判断)[^。；\n]{0,12}主胜", "主胜"),
-            (r"(?:推荐|看好|倾向|预测|判断)[^。；\n]{0,12}平", "平"),
-            (r"(?:推荐|看好|倾向|预测|判断)[^。；\n]{0,12}客胜", "客胜"),
-            (r"胜平负[^。；\n]{0,12}主胜", "主胜"),
-            (r"胜平负[^。；\n]{0,12}客胜", "客胜"),
-            (r"胜平负[^。；\n]{0,12}(?:平局|平)", "平"),
+            (r"(?:胜负结果预测|胜负方向|推荐|看好|倾向|预测|判断)[^。；\n]{0,12}主胜", "主胜"),
+            (r"(?:胜负结果预测|胜负方向|推荐|看好|倾向|预测|判断)[^。；\n]{0,12}平", "平"),
+            (r"(?:胜负结果预测|胜负方向|推荐|看好|倾向|预测|判断)[^。；\n]{0,12}客胜", "客胜"),
         ]
         match_main = _extract_first_match(text, match_patterns)
 
     if not handicap_main:
         handicap_patterns = [
-            (r"(?:让球|让平负|让胜平负)[^。；\n]{0,12}让胜", "让胜"),
-            (r"(?:让球|让平负|让胜平负)[^。；\n]{0,12}让平", "让平"),
-            (r"(?:让球|让平负|让胜平负)[^。；\n]{0,12}让负", "让负"),
-            (r"(?:推荐|看好|倾向|预测|判断)[^。；\n]{0,12}让胜", "让胜"),
-            (r"(?:推荐|看好|倾向|预测|判断)[^。；\n]{0,12}让平", "让平"),
-            (r"(?:推荐|看好|倾向|预测|判断)[^。；\n]{0,12}让负", "让负"),
+            (r"(?:让球胜平负|让球|让平负|让胜平负)[^。；\n]{0,12}让胜", "让胜"),
+            (r"(?:让球胜平负|让球|让平负|让胜平负)[^。；\n]{0,12}让平", "让平"),
+            (r"(?:让球胜平负|让球|让平负|让胜平负)[^。；\n]{0,12}让负", "让负"),
+            (r"受让胜", "让胜"),
+            (r"受让平", "让平"),
+            (r"受让负", "让负"),
         ]
         handicap_main = _extract_first_match(text, handicap_patterns)
 
@@ -148,4 +144,29 @@ def parse_gemini_output(raw_text: str) -> dict[str, Any]:
         "gemini_score_1": score_1,
         "gemini_score_2": score_2,
         "gemini_summary": _extract_summary_from_analysis(text),
+    }
+
+
+
+def parse_manual_raw_text(raw_text: str) -> dict[str, Any]:
+    text = (raw_text or "").strip()
+    parsed = parse_gemini_output(text)
+
+    scores = [s for s in [parsed.get("gemini_score_1"), parsed.get("gemini_score_2")] if s]
+    score_prediction = " / ".join(scores) if scores else None
+
+    analysis = parsed.get("gemini_summary")
+    m = re.search(r"(?:结果分析与预测|分析|观点)[:：]\s*(.+)", text, flags=re.S)
+    if m:
+        analysis = m.group(1).strip()
+    if not analysis:
+        analysis = text
+
+    return {
+        "result_prediction": parsed.get("gemini_match_main_pick"),
+        "handicap_prediction": parsed.get("gemini_handicap_main_pick"),
+        "score_prediction": score_prediction,
+        "analysis": analysis,
+        "raw_text": text,
+        "parse_warning": "" if parsed.get("gemini_match_main_pick") or parsed.get("gemini_handicap_main_pick") else "未能完整解析，请手动补充",
     }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 TABLE_COLUMNS = [
     "match_no",
@@ -10,6 +10,7 @@ TABLE_COLUMNS = [
     "away_team",
     "kickoff_time",
     "handicap",
+    "prediction_tag",
     "spf_win",
     "spf_draw",
     "spf_lose",
@@ -20,9 +21,11 @@ TABLE_COLUMNS = [
 ]
 
 
+
 def render_match_table(df: pd.DataFrame) -> None:
     cols = [c for c in TABLE_COLUMNS if c in df.columns]
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
+
 
 
 def render_match_selector(df: pd.DataFrame) -> pd.Series | None:
