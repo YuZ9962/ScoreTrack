@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+from services.chatgpt_store import load_chatgpt_predictions as _load_chatgpt_predictions
 
 
 @dataclass
@@ -87,3 +88,7 @@ def load_results(base_dir: Path | None = None) -> pd.DataFrame:
         return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
+
+
+def load_chatgpt_predictions(base_dir: Path | None = None) -> pd.DataFrame:
+    return _load_chatgpt_predictions(base_dir)

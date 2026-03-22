@@ -13,11 +13,15 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from components.data_controls import render_date_file_selector, render_fetch_section
+from services.chatgpt_parser import parse_chatgpt_output
+from services.chatgpt_runner import run_chatgpt_prediction
+from services.chatgpt_store import load_chatgpt_predictions, save_chatgpt_prediction
 from services.gemini_parser import parse_gemini_output, parse_manual_raw_text
 from services.gemini_runner import run_gemini_prediction
 from services.loader import get_data_context, load_matches_by_date
 from services.prediction_store import load_predictions, save_prediction
 from services.transforms import normalize_dataframe, sort_by_match_no
+from utils.chatgpt_prompt_builder import build_chatgpt_probability_prompt
 from utils.prompt_builder import build_simple_prediction_prompt
 
 STATUS_SUCCESS = "success"
@@ -107,6 +111,89 @@ def _is_pending_or_failed(pred_row: pd.Series | None) -> bool:
     if pred_row is None:
         return True
     return str(pred_row.get("prediction_status", "")) in {"", STATUS_FAILED, STATUS_PENDING}
+
+
+def _predict_single_chatgpt(match: pd.Series, issue_date: str) -> dict[str, object]:
+    prompt = build_chatgpt_probability_prompt(
+        league=str(match.get("league", "")),
+        home_team=str(match.get("home_team", "")),
+        away_team=str(match.get("away_team", "")),
+        kickoff_time=str(match.get("kickoff_time", "")),
+        handicap=str(match.get("handicap", "")),
+        spf_win=str(match.get("spf_win", "--")),
+        spf_draw=str(match.get("spf_draw", "--")),
+        spf_lose=str(match.get("spf_lose", "--")),
+        rqspf_win=str(match.get("rqspf_win", "--")),
+        rqspf_draw=str(match.get("rqspf_draw", "--")),
+        rqspf_lose=str(match.get("rqspf_lose", "--")),
+    )
+    result = run_chatgpt_prediction(prompt)
+    base = {
+        "issue_date": issue_date,
+        "match_no": match.get("match_no", ""),
+        "league": match.get("league", ""),
+        "home_team": match.get("home_team", ""),
+        "away_team": match.get("away_team", ""),
+        "kickoff_time": match.get("kickoff_time", ""),
+        "handicap": match.get("handicap", ""),
+        "raw_id": match.get("raw_id", ""),
+    }
+    if not result.get("ok"):
+        save_chatgpt_prediction(
+            {
+                **base,
+                "chatgpt_prompt": prompt,
+                "chatgpt_raw_text": "",
+                "chatgpt_model": result.get("model"),
+                "chatgpt_generated_at": result.get("generated_at"),
+            },
+            ROOT,
+        )
+        return result
+
+    parsed = parse_chatgpt_output(str(result.get("text", "")))
+    save_chatgpt_prediction(
+        {
+            **base,
+            "chatgpt_prompt": prompt,
+            "chatgpt_raw_text": result.get("text", ""),
+            **parsed,
+            "chatgpt_model": result.get("model"),
+            "chatgpt_generated_at": result.get("generated_at"),
+        },
+        ROOT,
+    )
+    result["structured"] = parsed
+    return result
+
+
+def _render_chatgpt_result(result: dict[str, object]) -> None:
+    if not result:
+        return
+    if not result.get("ok"):
+        st.error(str(result.get("error", "ChatGPT 调用失败")))
+        return
+    s = result.get("structured", {}) or {}
+    st.markdown("**比赛结果概率**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("主胜概率", f"{s.get('chatgpt_home_win_prob')}%" if s.get("chatgpt_home_win_prob") is not None else "-")
+    c2.metric("平局概率", f"{s.get('chatgpt_draw_prob')}%" if s.get("chatgpt_draw_prob") is not None else "-")
+    c3.metric("客胜概率", f"{s.get('chatgpt_away_win_prob')}%" if s.get("chatgpt_away_win_prob") is not None else "-")
+    st.markdown("**让球结果概率**")
+    h1, h2, h3 = st.columns(3)
+    h1.metric("让胜概率", f"{s.get('chatgpt_handicap_win_prob')}%" if s.get("chatgpt_handicap_win_prob") is not None else "-")
+    h2.metric("让平概率", f"{s.get('chatgpt_handicap_draw_prob')}%" if s.get("chatgpt_handicap_draw_prob") is not None else "-")
+    h3.metric("让负概率", f"{s.get('chatgpt_handicap_lose_prob')}%" if s.get("chatgpt_handicap_lose_prob") is not None else "-")
+    st.write(
+        f"**最可能比分**：{s.get('chatgpt_score_1') or '-'} / {s.get('chatgpt_score_2') or '-'} / {s.get('chatgpt_score_3') or '-'}"
+    )
+    st.write(f"**最大概率方向**：{s.get('chatgpt_top_direction') or '-'}")
+    st.write(f"**爆冷概率**：{s.get('chatgpt_upset_probability_text') or '-'}")
+    st.write(f"**简短摘要**：{s.get('chatgpt_summary') or '-'}")
+    with st.expander("查看 ChatGPT Prompt", expanded=False):
+        st.code(str(result.get("prompt", "")), language="text")
+    with st.expander("查看 ChatGPT 原始回复", expanded=False):
+        st.write(str(result.get("text", "")))
 
 
 
@@ -338,7 +425,7 @@ single_pred = _get_prediction_row(pred_df, selected_date, selected_match)
 st.info(f"当前场次状态：{_status_text(single_pred)}")
 
 st.markdown("---")
-col_a, col_b = st.columns(2)
+col_a, col_b, col_c, col_d = st.columns(4)
 
 with col_a:
     if st.button("预测当前场次", type="primary"):
@@ -402,10 +489,49 @@ with col_b:
             if failed_matches:
                 st.warning(f"失败场次：{', '.join(failed_matches)}")
 
+with col_c:
+    if st.button("生成 ChatGPT 预测"):
+        with st.spinner("正在生成 ChatGPT 预测..."):
+            try:
+                chatgpt_result = _predict_single_chatgpt(selected_match, selected_date)
+            except Exception:
+                chatgpt_result = {"ok": False, "error": "ChatGPT 预测失败，请稍后重试"}
+        st.session_state["prediction_chatgpt_single_result"] = chatgpt_result
+
+with col_d:
+    if st.button("一键生成当日全部 ChatGPT 预测"):
+        target_df = filtered_df.copy()
+        total = len(target_df)
+        if total == 0:
+            st.info("当前筛选下没有需要预测的比赛。")
+        else:
+            progress = st.progress(0)
+            status = st.empty()
+            success_count = 0
+            failed = 0
+            for i, (_, row) in enumerate(target_df.iterrows(), start=1):
+                status.info(f"ChatGPT 预测第 {i}/{total} 场：{row.get('match_no', '')}")
+                try:
+                    r = _predict_single_chatgpt(row, selected_date)
+                    if r.get("ok"):
+                        success_count += 1
+                    else:
+                        failed += 1
+                except Exception:
+                    failed += 1
+                progress.progress(i / total)
+            status.success("ChatGPT 批量预测完成")
+            st.success(f"ChatGPT 批量预测完成：成功 {success_count} 场，失败 {failed} 场")
+
 single_result = st.session_state.get("prediction_single_result")
 if single_result:
     st.markdown("### 当前场次预测结果")
     _render_single_result(single_result)
+
+chatgpt_single_result = st.session_state.get("prediction_chatgpt_single_result")
+if chatgpt_single_result:
+    st.markdown("### 当前场次 ChatGPT 预测结果")
+    _render_chatgpt_result(chatgpt_single_result)
 
 st.markdown("---")
 st.markdown("### 待补录场次")
@@ -468,3 +594,42 @@ for col in show_cols:
 
 show_df = sort_by_match_no(show_df[show_cols])
 st.dataframe(show_df, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+st.markdown("### 当日已生成 ChatGPT 概率预测")
+chatgpt_df = load_chatgpt_predictions(ROOT)
+if not chatgpt_df.empty:
+    cshow = chatgpt_df[chatgpt_df["issue_date"].astype(str) == selected_date].copy()
+    if selected_league != "全部联赛":
+        cshow = cshow[cshow["league"].fillna("").astype(str) == selected_league]
+    if not cshow.empty:
+        cols = [
+            "issue_date",
+            "match_no",
+            "league",
+            "home_team",
+            "away_team",
+            "kickoff_time",
+            "handicap",
+            "chatgpt_home_win_prob",
+            "chatgpt_draw_prob",
+            "chatgpt_away_win_prob",
+            "chatgpt_handicap_win_prob",
+            "chatgpt_handicap_draw_prob",
+            "chatgpt_handicap_lose_prob",
+            "chatgpt_score_1",
+            "chatgpt_score_2",
+            "chatgpt_score_3",
+            "chatgpt_top_direction",
+            "chatgpt_upset_probability_text",
+            "chatgpt_generated_at",
+        ]
+        for col in cols:
+            if col not in cshow.columns:
+                cshow[col] = None
+        cshow = sort_by_match_no(cshow[cols])
+        st.dataframe(cshow, use_container_width=True, hide_index=True)
+    else:
+        st.info("当前日期/联赛暂无 ChatGPT 预测")
+else:
+    st.info("暂无 ChatGPT 预测记录")

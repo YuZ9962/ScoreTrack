@@ -248,3 +248,43 @@ streamlit run app/app.py
 - Analytics 会将 Gemini 主推与真实结果对比，输出：`命中/未命中/未开奖`。
 
 - 赛果抓取日志写入 `logs/app.log`，包含：开始抓取、请求 URL、解析条数、写入条数、匹配预测条数。
+
+## 9. ChatGPT 概率预测（新增）
+
+### 9.1 环境变量
+
+在 `.env` 中新增：
+
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-5.4
+```
+
+### 9.2 功能说明
+
+- Prediction 页面新增：
+  - `生成 ChatGPT 预测`（单场）
+  - `一键生成当日全部 ChatGPT 预测`（批量）
+- ChatGPT 采用独立提示词模板（与 Gemini 分离）。
+- 预测结果写入独立文件：
+  - `data/predictions/chatgpt_predictions.csv`
+
+### 9.3 ChatGPT 结果字段
+
+- `chatgpt_prompt`
+- `chatgpt_raw_text`
+- `chatgpt_home_win_prob` / `chatgpt_draw_prob` / `chatgpt_away_win_prob`
+- `chatgpt_handicap_win_prob` / `chatgpt_handicap_draw_prob` / `chatgpt_handicap_lose_prob`
+- `chatgpt_score_1` / `chatgpt_score_2` / `chatgpt_score_3`
+- `chatgpt_top_direction`
+- `chatgpt_upset_probability_text`
+- `chatgpt_summary`
+- `chatgpt_model`
+- `chatgpt_generated_at`
+
+### 9.4 Analytics 新模块
+
+Analytics 页面新增 `ChatGPT 概率预测分析` 模块，联动顶部筛选（按日/按月/按年 + 联赛），展示：
+
+- 预测总场次
+- 概率结果表（主胜/平/客胜、让胜/让平/让负、推荐比分、最大概率方向、爆冷概率）

@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from components.data_controls import render_fetch_section
-from services.loader import get_data_context, load_all_matches, load_results
+from services.loader import get_data_context, load_all_matches, load_chatgpt_predictions, load_results
 from services.prediction_store import load_predictions
 from services.result_evaluator import build_hit_summary, evaluate_predictions
 from services.transforms import (
@@ -211,3 +211,81 @@ for col in show_cols:
 sorted_df = sort_by_match_no(eval_df[show_cols].copy())
 display_df = _build_cn_table(sorted_df)
 st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+st.markdown("### ChatGPT 概率预测分析")
+chatgpt_df = load_chatgpt_predictions(ROOT)
+chatgpt_df = ensure_issue_date_columns(chatgpt_df, source_col="issue_date")
+filtered_chatgpt = filter_by_time_and_league(chatgpt_df, time_mode, time_value, selected_league)
+
+st.metric("ChatGPT 预测总场次", len(filtered_chatgpt))
+if filtered_chatgpt.empty:
+    st.info("当前筛选条件下暂无 ChatGPT 概率预测数据。")
+else:
+    for c in [
+        "kickoff_time",
+        "match_no",
+        "league",
+        "home_team",
+        "away_team",
+        "handicap",
+        "chatgpt_home_win_prob",
+        "chatgpt_draw_prob",
+        "chatgpt_away_win_prob",
+        "chatgpt_handicap_win_prob",
+        "chatgpt_handicap_draw_prob",
+        "chatgpt_handicap_lose_prob",
+        "chatgpt_score_1",
+        "chatgpt_score_2",
+        "chatgpt_score_3",
+        "chatgpt_top_direction",
+        "chatgpt_upset_probability_text",
+    ]:
+        if c not in filtered_chatgpt.columns:
+            filtered_chatgpt[c] = None
+
+    cdf = filtered_chatgpt.copy()
+    cdf["日期时间"] = pd.to_datetime(cdf["kickoff_time"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    cdf["比赛序号"] = cdf["match_no"]
+    cdf["联赛"] = cdf["league"]
+    cdf["主客队"] = cdf["home_team"].astype(str) + " vs " + cdf["away_team"].astype(str)
+    cdf["让球"] = cdf["handicap"]
+    cdf["主胜概率"] = cdf["chatgpt_home_win_prob"]
+    cdf["平局概率"] = cdf["chatgpt_draw_prob"]
+    cdf["客胜概率"] = cdf["chatgpt_away_win_prob"]
+    cdf["让胜概率"] = cdf["chatgpt_handicap_win_prob"]
+    cdf["让平概率"] = cdf["chatgpt_handicap_draw_prob"]
+    cdf["让负概率"] = cdf["chatgpt_handicap_lose_prob"]
+    cdf["推荐比分"] = (
+        cdf["chatgpt_score_1"].fillna("").astype(str)
+        + "/"
+        + cdf["chatgpt_score_2"].fillna("").astype(str)
+        + "/"
+        + cdf["chatgpt_score_3"].fillna("").astype(str)
+    ).str.strip("/")
+    cdf["最大概率方向"] = cdf["chatgpt_top_direction"]
+    cdf["爆冷概率"] = cdf["chatgpt_upset_probability_text"]
+
+    cdf = sort_by_match_no(cdf)
+    st.dataframe(
+        cdf[
+            [
+                "日期时间",
+                "比赛序号",
+                "联赛",
+                "主客队",
+                "让球",
+                "主胜概率",
+                "平局概率",
+                "客胜概率",
+                "让胜概率",
+                "让平概率",
+                "让负概率",
+                "推荐比分",
+                "最大概率方向",
+                "爆冷概率",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
