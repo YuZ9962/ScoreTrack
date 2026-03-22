@@ -41,31 +41,48 @@ def _match_label(row: pd.Series) -> str:
 
 
 
-def _prediction_mask(pred_df: pd.DataFrame, issue_date: str, match_row: pd.Series) -> pd.Series:
-    if pred_df.empty:
-        return pd.Series([], dtype=bool)
-    raw_id = str(match_row.get("raw_id", "") or "").strip()
-    if raw_id:
-        return (
-            (pred_df["issue_date"].astype(str) == issue_date)
-            & (pred_df["raw_id"].astype(str) == raw_id)
-        )
-    return (
-        (pred_df["issue_date"].astype(str) == issue_date)
-        & (pred_df["match_no"].astype(str) == str(match_row.get("match_no", "")))
-        & (pred_df["home_team"].astype(str) == str(match_row.get("home_team", "")))
-        & (pred_df["away_team"].astype(str) == str(match_row.get("away_team", "")))
-    )
-
-
-
 def _get_prediction_row(pred_df: pd.DataFrame, issue_date: str, match_row: pd.Series) -> pd.Series | None:
     if pred_df.empty:
         return None
-    mask = _prediction_mask(pred_df, issue_date, match_row)
-    if mask.empty or not mask.any():
-        return None
-    return pred_df[mask].iloc[-1]
+
+    raw_id = str(match_row.get("raw_id", "") or "").strip()
+    match_no = str(match_row.get("match_no", "") or "").strip()
+    home_team = str(match_row.get("home_team", "") or "").strip()
+    away_team = str(match_row.get("away_team", "") or "").strip()
+    kickoff_date = str(match_row.get("kickoff_time", "") or "").strip()[:10]
+
+    if raw_id and "raw_id" in pred_df.columns:
+        m = pred_df[pred_df["raw_id"].astype(str) == raw_id]
+        if not m.empty:
+            return m.iloc[-1]
+
+    if match_no:
+        m = pred_df[pred_df["match_no"].astype(str) == match_no]
+        if not m.empty:
+            return m.iloc[-1]
+
+    if match_no and home_team and away_team:
+        m = pred_df[
+            (pred_df["match_no"].astype(str) == match_no)
+            & (pred_df["home_team"].astype(str) == home_team)
+            & (pred_df["away_team"].astype(str) == away_team)
+        ]
+        if not m.empty:
+            return m.iloc[-1]
+
+    if home_team and away_team:
+        m = pred_df[
+            (pred_df["home_team"].astype(str) == home_team)
+            & (pred_df["away_team"].astype(str) == away_team)
+        ]
+        if kickoff_date and "kickoff_time" in m.columns:
+            m2 = m[m["kickoff_time"].astype(str).str[:10] == kickoff_date]
+            if not m2.empty:
+                return m2.iloc[-1]
+        if not m.empty:
+            return m.iloc[-1]
+
+    return None
 
 
 
@@ -337,7 +354,7 @@ with col_b:
         target_df = filtered_df.copy()
         if only_missing and not pred_df.empty:
             target_df = target_df[
-                ~target_df.apply(lambda r: _prediction_mask(pred_df, selected_date, r).any(), axis=1)
+                target_df.apply(lambda r: _get_prediction_row(pred_df, selected_date, r) is None, axis=1)
             ]
 
         total = len(target_df)

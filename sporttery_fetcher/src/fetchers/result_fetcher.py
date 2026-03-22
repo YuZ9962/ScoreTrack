@@ -544,7 +544,10 @@ def _count_matched_predictions(base_dir: Path, result_df: pd.DataFrame) -> int:
     matched = 0
     for _, row in pred_df.iterrows():
         raw_id = str(row.get("raw_id", "") or "").strip()
-        issue_date = str(row.get("issue_date", "") or "").strip()
+        match_no = str(row.get("match_no", "") or "").strip()
+        home_team = str(row.get("home_team", "") or "").strip()
+        away_team = str(row.get("away_team", "") or "").strip()
+        kickoff_date = str(row.get("kickoff_time", "") or "").strip()[:10]
 
         if raw_id and "raw_id" in result_df.columns:
             m = result_df[result_df["raw_id"].astype(str) == raw_id]
@@ -552,21 +555,31 @@ def _count_matched_predictions(base_dir: Path, result_df: pd.DataFrame) -> int:
                 matched += 1
                 continue
 
-        m = result_df[
-            (result_df["issue_date"].astype(str) == issue_date)
-            & (result_df["match_no"].astype(str) == str(row.get("match_no", "")))
-        ]
-        if not m.empty:
-            matched += 1
-            continue
+        if match_no:
+            m = result_df[result_df["match_no"].astype(str) == match_no]
+            if not m.empty:
+                matched += 1
+                continue
 
-        m = result_df[
-            (result_df["issue_date"].astype(str) == issue_date)
-            & (result_df["home_team"].astype(str) == str(row.get("home_team", "")))
-            & (result_df["away_team"].astype(str) == str(row.get("away_team", "")))
-        ]
-        if not m.empty:
-            matched += 1
+        if match_no and home_team and away_team:
+            m = result_df[
+                (result_df["match_no"].astype(str) == match_no)
+                & (result_df["home_team"].astype(str) == home_team)
+                & (result_df["away_team"].astype(str) == away_team)
+            ]
+            if not m.empty:
+                matched += 1
+                continue
+
+        if home_team and away_team:
+            m = result_df[
+                (result_df["home_team"].astype(str) == home_team)
+                & (result_df["away_team"].astype(str) == away_team)
+            ]
+            if kickoff_date and "issue_date" in m.columns:
+                m = m[m["issue_date"].astype(str) == kickoff_date]
+            if not m.empty:
+                matched += 1
 
     return matched
 
