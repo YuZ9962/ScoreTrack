@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -8,10 +9,21 @@ from openai import OpenAI
 
 
 DEFAULT_MODEL = "gpt-5.4"
+logger = logging.getLogger("chatgpt_runner")
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _extract_output_text(response: Any) -> str:
+    text = (getattr(response, "output_text", None) or "").strip()
+    if text:
+        return text
+    try:
+        return str(response)
+    except Exception:
+        return ""
 
 
 def run_chatgpt_prediction(prompt: str) -> dict[str, Any]:
@@ -29,17 +41,25 @@ def run_chatgpt_prediction(prompt: str) -> dict[str, Any]:
 
     try:
         client = OpenAI(api_key=api_key)
+        # 先优先保证可用性：不启用 JSON mode，直接获取文本回复。
         response = client.responses.create(
             model=model,
             input=[
-                {"role": "system", "content": "你是专业足球比赛精算分析师。请严格按要求返回 JSON。"},
+                {"role": "system", "content": "你是专业足球比赛精算分析师。请按用户给定格式回答。"},
                 {"role": "user", "content": prompt},
             ],
-            response_format={"type": "json_object"},
         )
-        text = (getattr(response, "output_text", None) or "").strip()
+        text = _extract_output_text(response)
         if not text:
-            text = str(response)
+            logger.error("ChatGPT 响应成功但文本为空 model=%s", model)
+            return {
+                "ok": False,
+                "error": "ChatGPT 返回为空，请稍后重试",
+                "model": model,
+                "prompt": prompt,
+                "text": "",
+                "generated_at": _now_iso(),
+            }
         return {
             "ok": True,
             "error": "",
@@ -48,10 +68,13 @@ def run_chatgpt_prediction(prompt: str) -> dict[str, Any]:
             "text": text,
             "generated_at": _now_iso(),
         }
-    except Exception:
+    except Exception as exc:
+        err_type = type(exc).__name__
+        err_msg = str(exc).strip() or "unknown error"
+        logger.exception("ChatGPT 请求失败 model=%s err_type=%s err_msg=%s", model, err_type, err_msg)
         return {
             "ok": False,
-            "error": "ChatGPT 请求失败，请检查 OPENAI_API_KEY 或模型配置",
+            "error": f"ChatGPT 请求失败（{err_type}: {err_msg}）",
             "model": model,
             "prompt": prompt,
             "text": "",
