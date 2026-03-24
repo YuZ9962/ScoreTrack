@@ -13,6 +13,7 @@ if str(APP_DIR) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from components.charts import render_semantic_probability_pie
 from components.data_controls import render_fetch_section
 from services.loader import get_data_context, load_all_matches, load_chatgpt_predictions, load_results
 from services.prediction_store import load_predictions
@@ -24,6 +25,7 @@ from services.transforms import (
     sort_by_match_no,
 )
 from src.fetchers.result_fetcher import fetch_and_save_results
+from utils.formatting import semantic_match_labels
 
 TIME_MODES = ["按日", "按月", "按年"]
 
@@ -312,51 +314,42 @@ else:
     )
 
     pie_col1, pie_col2 = st.columns(2)
+
+    unique_pairs = (
+        cdf[["home_team", "away_team"]]
+        .fillna("")
+        .astype(str)
+        .drop_duplicates()
+    )
+    is_single_match_context = len(unique_pairs) == 1
+    home_name = unique_pairs.iloc[0]["home_team"] if is_single_match_context else ""
+    away_name = unique_pairs.iloc[0]["away_team"] if is_single_match_context else ""
+
+    match_labels = semantic_match_labels(home_name, away_name, is_single_match_context)
+    match_values = [
+        pd.to_numeric(cdf["chatgpt_home_win_prob"], errors="coerce").fillna(0).sum(),
+        pd.to_numeric(cdf["chatgpt_draw_prob"], errors="coerce").fillna(0).sum(),
+        pd.to_numeric(cdf["chatgpt_away_win_prob"], errors="coerce").fillna(0).sum(),
+    ]
+    handicap_labels = ["让胜", "让平", "让负"]
+    handicap_values = [
+        pd.to_numeric(cdf["chatgpt_handicap_win_prob"], errors="coerce").fillna(0).sum(),
+        pd.to_numeric(cdf["chatgpt_handicap_draw_prob"], errors="coerce").fillna(0).sum(),
+        pd.to_numeric(cdf["chatgpt_handicap_lose_prob"], errors="coerce").fillna(0).sum(),
+    ]
+
     with pie_col1:
-        st.markdown("#### 胜平负概率分布")
-        pie1_df = pd.DataFrame(
-            {
-                "label": ["主胜", "平局", "客胜"],
-                "value": [
-                    pd.to_numeric(cdf["chatgpt_home_win_prob"], errors="coerce").fillna(0).sum(),
-                    pd.to_numeric(cdf["chatgpt_draw_prob"], errors="coerce").fillna(0).sum(),
-                    pd.to_numeric(cdf["chatgpt_away_win_prob"], errors="coerce").fillna(0).sum(),
-                ],
-            }
+        render_semantic_probability_pie(
+            title="胜平负概率分布",
+            labels=match_labels,
+            values=match_values,
+            semantic_keys=["home", "draw", "away"],
         )
-        st.vega_lite_chart(
-            pie1_df,
-            {
-                "mark": {"type": "arc", "innerRadius": 40},
-                "encoding": {
-                    "theta": {"field": "value", "type": "quantitative"},
-                    "color": {"field": "label", "type": "nominal"},
-                    "tooltip": [{"field": "label"}, {"field": "value"}],
-                },
-            },
-            use_container_width=True,
-        )
+
     with pie_col2:
-        st.markdown("#### 让胜平负概率分布")
-        pie2_df = pd.DataFrame(
-            {
-                "label": ["让胜", "让平", "让负"],
-                "value": [
-                    pd.to_numeric(cdf["chatgpt_handicap_win_prob"], errors="coerce").fillna(0).sum(),
-                    pd.to_numeric(cdf["chatgpt_handicap_draw_prob"], errors="coerce").fillna(0).sum(),
-                    pd.to_numeric(cdf["chatgpt_handicap_lose_prob"], errors="coerce").fillna(0).sum(),
-                ],
-            }
-        )
-        st.vega_lite_chart(
-            pie2_df,
-            {
-                "mark": {"type": "arc", "innerRadius": 40},
-                "encoding": {
-                    "theta": {"field": "value", "type": "quantitative"},
-                    "color": {"field": "label", "type": "nominal"},
-                    "tooltip": [{"field": "label"}, {"field": "value"}],
-                },
-            },
-            use_container_width=True,
+        render_semantic_probability_pie(
+            title="让胜平负概率分布",
+            labels=handicap_labels,
+            values=handicap_values,
+            semantic_keys=["home", "draw", "away"],
         )
