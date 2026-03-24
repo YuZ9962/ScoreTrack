@@ -1,6 +1,39 @@
 from __future__ import annotations
 
 
+CN_HANDICAP_MAP = {
+    -1: "让一球",
+    1: "受让一球",
+    -2: "让两球",
+    2: "受让两球",
+    -3: "让三球",
+    3: "受让三球",
+}
+
+
+def _parse_handicap_value(handicap: str | int | float | None) -> int | None:
+    if handicap is None:
+        return None
+    s = str(handicap).strip()
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def build_handicap_text(home_team: str, handicap: str | int | float | None) -> str:
+    value = _parse_handicap_value(handicap)
+    if value is None or value == 0:
+        return f"{home_team} 平手"
+    if value in CN_HANDICAP_MAP:
+        return f"{home_team} {CN_HANDICAP_MAP[value]}"
+    if value < 0:
+        return f"{home_team} 让{abs(value)}球"
+    return f"{home_team} 受让{abs(value)}球"
+
+
 def build_chatgpt_probability_prompt(
     *,
     league: str,
@@ -15,9 +48,11 @@ def build_chatgpt_probability_prompt(
     rqspf_draw: str,
     rqspf_lose: str,
 ) -> str:
-    return f"""你现在是一名 专业足球比赛精算分析师（Football Quantitative Analyst）。
+    handicap_text = build_handicap_text(home_team=home_team, handicap=handicap)
 
-请对以下比赛进行 深度分析，并基于分析推导概率预测。
+    return f"""你现在是一名专业足球比赛精算分析师（Football Quantitative Analyst）。
+
+请对以下比赛进行深度分析，并基于分析推导概率预测。
 注意：最终概率必须来源于你的综合分析，不允许直接使用赔率隐含概率作为结果。赔率只能作为参考信息。
 
 ⸻
@@ -36,7 +71,7 @@ def build_chatgpt_probability_prompt(
 
 亚洲盘口
 
-{home_team} {handicap}
+{handicap_text}
 
 让球赔率
 
@@ -82,15 +117,15 @@ def build_chatgpt_probability_prompt(
 
 请重点分析：
 
-当前 {spf_win}主胜赔率是否合理
+当前主胜赔率是否合理
 
-{handicap}盘口的合理性
+当前亚洲盘口的合理性
 
-胜平负赔率与让球盘口之间是否存在 矛盾
+胜平负赔率与让球盘口之间是否存在矛盾
 
-庄家可能的 真实意图
+庄家可能的真实意图
 
-是否存在 诱盘或过热方向
+是否存在诱盘或过热方向
 
 ⸻
 
@@ -104,31 +139,57 @@ def build_chatgpt_probability_prompt(
 
 是否可能出现大胜
 
-是否更容易出现 1球小胜
+是否更容易出现1球小胜
+
+是否存在平局拉扯的可能
 
 ⸻
 
 第四步：基于分析推导概率
 
-根据以上分析给出 你自己的概率预测（总和必须为100%）。
+根据以上分析给出你自己的概率预测（总和必须为100%）。
 
-注意：
-概率必须来源于分析判断，而不是赔率换算。
+要求：
+1. 【比赛结果概率】三项总和必须为100%
+2. 【让球结果概率】三项总和必须为100%
+3. 概率必须来源于分析判断，而不是赔率换算
+4. 请给出3个最可能比分，并按概率从高到低排序
+5. 如果你判断存在主推和次推，请在分析文字中体现，但最终概率输出仍须唯一明确
 
 ⸻
 
-请以 JSON 返回，键名固定：
-{{
-  "match_result_prob": {{"home_win": 0, "draw": 0, "away_win": 0}},
-  "handicap_result_prob": {{"handicap_win": 0, "handicap_draw": 0, "handicap_lose": 0}},
-  "likely_scores": ["0-0", "1-0", "1-1"],
-  "top_direction": "主胜",
-  "upset_probability_text": "主队不胜概率 xx%",
-  "summary": "不超过120字"
-}}
+输出格式
 
-要求：
-- 概率都用数字（0-100），两组概率各自总和=100
-- likely_scores 固定输出3个比分字符串
-- 不要输出 Markdown 代码块，只输出 JSON
+请严格按照以下格式输出：
+
+【比赛结果概率】
+主胜：X%
+平局：X%
+客胜：X%
+
+【让球结果概率】
+让胜：X%
+让平：X%
+让负：X%
+
+【最可能比分】
+X-X
+X-X
+X-X
+
+【最大概率方向】
+一句话说明（只写一个最强方向）
+
+【爆冷概率】
+请说明你的定义，并给出对应概率
+
+在上述分析结束后，请再严格补充以下内容，每项单独一行：
+
+胜平负主方向：<主胜/平局/客胜>
+让球主方向：<让胜/让平/让负>
+比分1：<X-X>
+比分2：<X-X>
+比分3：<X-X>
+爆冷方向定义：<主队不胜/客胜/其他>
+爆冷概率数值：<X%>
 """
