@@ -126,20 +126,19 @@ def _structure_edge_recommendation(row: pd.Series, strategy_id: str) -> Strategy
         confidence += 16
         rationale_points.append("主胜赔率<1.85 且主队让球，优势兑现路径更集中")
 
-    # Rule 2: 赔率接近 + 平局赔率不高
+    # Rule 2: 主胜赔率偏低但平局风险明显
     if (
         spf_win is not None
-        and spf_lose is not None
         and spf_draw is not None
-        and abs(spf_win - spf_lose) <= 0.3
-        and spf_draw <= 3.35
+        and spf_win < 1.95
+        and spf_draw <= 3.10
     ):
-        recommendation_label = "平局拉扯型"
-        primary, secondary = "平平", "平胜"
-        fit += 8
-        confidence -= 4
-        warning_tags.append("拉扯局波动")
-        rationale_points.append("胜负赔率接近且平赔不高，半场僵持概率上升")
+        recommendation_label = "半场拉扯下半场兑现"
+        primary, secondary = "平胜", "平平"
+        fit += 6
+        confidence -= 3
+        warning_tags.append("平局风险")
+        rationale_points.append("主胜赔率较低但平局赔率同样偏低，需防半场僵持")
 
     # Rule 3: 深盘分歧
     if handicap <= -1 and spf_win is not None and spf_win > 2.05:
@@ -148,7 +147,8 @@ def _structure_edge_recommendation(row: pd.Series, strategy_id: str) -> Strategy
         confidence -= 12
         rationale_points.append("盘口较深但主胜赔率未同步压低，盘赔分歧明显")
 
-    # 回避场景 A：双防型对决（以平赔偏低+胜负接近作为近似信号）
+    # 回避场景 A：双防型对决（低进球结构）
+    dual_defense_risk = False
     if (
         spf_draw is not None
         and spf_draw <= 2.9
@@ -156,9 +156,10 @@ def _structure_edge_recommendation(row: pd.Series, strategy_id: str) -> Strategy
         and spf_lose is not None
         and abs(spf_win - spf_lose) <= 0.35
     ):
+        dual_defense_risk = True
         warning_tags.append("双防型低进球风险")
-        fit -= 16
-        confidence -= 10
+        fit -= 22
+        confidence -= 14
 
     # 回避场景 B：强队客场密集赛程风险（近似：客胜低赔+主受让）
     if handicap > 0.5 and spf_lose is not None and spf_lose < 2.0:
@@ -194,7 +195,12 @@ def _structure_edge_recommendation(row: pd.Series, strategy_id: str) -> Strategy
     should_skip = False
     recommendation_type = "单选"
 
-    if fit < 45 or (risk == "high" and len(warning_tags) >= 2):
+    if dual_defense_risk:
+        should_skip = True
+        recommendation_type = "跳过"
+        primary, secondary = "平平", None
+        recommendation_label = "不适合介入"
+    elif fit < 45 or (risk == "high" and len(warning_tags) >= 2):
         should_skip = True
         recommendation_type = "跳过"
         primary, secondary = "平平", None
