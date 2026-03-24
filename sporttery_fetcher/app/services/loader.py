@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 from services.chatgpt_store import load_chatgpt_predictions as _load_chatgpt_predictions
+from services.prediction_store import load_predictions as _load_predictions
 
 
 @dataclass
@@ -92,3 +93,17 @@ def load_results(base_dir: Path | None = None) -> pd.DataFrame:
 
 def load_chatgpt_predictions(base_dir: Path | None = None) -> pd.DataFrame:
     return _load_chatgpt_predictions(base_dir)
+
+
+def load_recommendation_inputs(date_str: str, ctx: DataContext, base_dir: Path | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    matches_df = load_matches_by_date(date_str, ctx)
+
+    gemini_df = _load_predictions(base_dir)
+    if not gemini_df.empty and "issue_date" in gemini_df.columns:
+        gemini_df = gemini_df[gemini_df["issue_date"].astype(str) == str(date_str)].copy()
+
+    chatgpt_df = _load_chatgpt_predictions(base_dir)
+    if not chatgpt_df.empty and "issue_date" in chatgpt_df.columns:
+        chatgpt_df = chatgpt_df[chatgpt_df["issue_date"].astype(str) == str(date_str)].copy()
+
+    return matches_df, gemini_df, chatgpt_df
