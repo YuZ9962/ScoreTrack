@@ -18,6 +18,16 @@ class StrategyMeta:
     applicable_scenarios: list[str]
     not_applicable_scenarios: list[str]
     output_logic: list[str]
+    strategy_principles: dict[str, list[str]]
+    strategy_output_schema: list[str]
+
+
+COMING_SOON_PRINCIPLES = {
+    "baseline_patterns": ["Coming Soon"],
+    "focus_scenarios": ["Coming Soon"],
+    "avoidance_rules": ["Coming Soon"],
+    "bankroll_notes": ["Coming Soon"],
+}
 
 
 _REGISTRY = {
@@ -34,6 +44,8 @@ _REGISTRY = {
         applicable_scenarios=["Coming Soon"],
         not_applicable_scenarios=["Coming Soon"],
         output_logic=["Coming Soon"],
+        strategy_principles=COMING_SOON_PRINCIPLES,
+        strategy_output_schema=STRUCTURE_EDGE_V1["strategy_output_schema"],
     ),
     "counter_attack_v1": StrategyMeta(
         id="counter_attack_v1",
@@ -47,6 +59,8 @@ _REGISTRY = {
         applicable_scenarios=["Coming Soon"],
         not_applicable_scenarios=["Coming Soon"],
         output_logic=["Coming Soon"],
+        strategy_principles=COMING_SOON_PRINCIPLES,
+        strategy_output_schema=STRUCTURE_EDGE_V1["strategy_output_schema"],
     ),
     "cup_rotation_v1": StrategyMeta(
         id="cup_rotation_v1",
@@ -60,6 +74,8 @@ _REGISTRY = {
         applicable_scenarios=["Coming Soon"],
         not_applicable_scenarios=["Coming Soon"],
         output_logic=["Coming Soon"],
+        strategy_principles=COMING_SOON_PRINCIPLES,
+        strategy_output_schema=STRUCTURE_EDGE_V1["strategy_output_schema"],
     ),
     "hot_cold_divergence_v1": StrategyMeta(
         id="hot_cold_divergence_v1",
@@ -73,6 +89,8 @@ _REGISTRY = {
         applicable_scenarios=["Coming Soon"],
         not_applicable_scenarios=["Coming Soon"],
         output_logic=["Coming Soon"],
+        strategy_principles=COMING_SOON_PRINCIPLES,
+        strategy_output_schema=STRUCTURE_EDGE_V1["strategy_output_schema"],
     ),
 }
 

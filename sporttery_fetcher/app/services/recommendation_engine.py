@@ -5,6 +5,9 @@ from dataclasses import dataclass, asdict
 import pandas as pd
 
 
+STRUCTURE_PICKS = ["胜胜", "平胜", "平平"]
+
+
 @dataclass
 class StrategyRecommendation:
     strategy_id: str
@@ -44,18 +47,11 @@ def _parse_handicap(v: object) -> float:
 
 
 def _risk_level(score: int) -> str:
-    if score >= 70:
+    if score >= 75:
         return "low"
-    if score >= 50:
+    if score >= 55:
         return "medium"
     return "high"
-
-
-def _pick_with_fallback(values: list[tuple[str, float]]) -> tuple[str, str | None]:
-    ranked = sorted(values, key=lambda x: x[1])
-    primary = ranked[0][0]
-    secondary = ranked[1][0] if len(ranked) > 1 and abs(ranked[1][1] - ranked[0][1]) <= 0.22 else None
-    return primary, secondary
 
 
 def _build_match_id(row: pd.Series) -> str:
@@ -68,19 +64,14 @@ def _build_match_id(row: pd.Series) -> str:
 def _merge_predictions(matches_df: pd.DataFrame, gemini_df: pd.DataFrame, chatgpt_df: pd.DataFrame) -> pd.DataFrame:
     out = matches_df.copy()
 
-    def _prep(df: pd.DataFrame, cols: list[str], prefix: str) -> pd.DataFrame:
+    def _prep(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
         if df.empty:
             return pd.DataFrame(columns=["raw_id", "match_no", "home_team", "away_team", *cols])
         keep = [c for c in ["raw_id", "match_no", "home_team", "away_team", *cols] if c in df.columns]
-        renamed = {c: f"{prefix}{c}" for c in keep if c not in ["raw_id", "match_no", "home_team", "away_team"]}
-        base = df[keep].copy().rename(columns=renamed)
+        base = df[keep].copy()
         return base.drop_duplicates(subset=["raw_id", "match_no", "home_team", "away_team"], keep="last")
 
-    g = _prep(
-        gemini_df,
-        ["gemini_match_main_pick", "gemini_match_secondary_pick", "gemini_handicap_main_pick"],
-        "",
-    )
+    g = _prep(gemini_df, ["gemini_match_main_pick", "gemini_match_secondary_pick"])
     c = _prep(
         chatgpt_df,
         [
@@ -90,7 +81,6 @@ def _merge_predictions(matches_df: pd.DataFrame, gemini_df: pd.DataFrame, chatgp
             "chatgpt_draw_prob",
             "chatgpt_away_win_prob",
         ],
-        "",
     )
 
     if not g.empty:
@@ -100,96 +90,141 @@ def _merge_predictions(matches_df: pd.DataFrame, gemini_df: pd.DataFrame, chatgp
     return out
 
 
+def _map_direction_to_structure(pick: str) -> set[str]:
+    p = str(pick or "").strip()
+    if p == "主胜":
+        return {"胜胜", "平胜"}
+    if p == "平":
+        return {"平平", "平胜"}
+    return set()
+
+
 def _structure_edge_recommendation(row: pd.Series, strategy_id: str) -> StrategyRecommendation:
     home_team = str(row.get("home_team", "")).strip()
     away_team = str(row.get("away_team", "")).strip()
-    handicap = _parse_handicap(row.get("handicap"))
+    league = str(row.get("league", "")).strip()
 
+    handicap = _parse_handicap(row.get("handicap"))
     spf_win = _safe_float(row.get("spf_win"))
     spf_draw = _safe_float(row.get("spf_draw"))
     spf_lose = _safe_float(row.get("spf_lose"))
 
-    values = [
-        ("主胜", spf_win if spf_win is not None else 9.99),
-        ("平", spf_draw if spf_draw is not None else 9.99),
-        ("客胜", spf_lose if spf_lose is not None else 9.99),
-    ]
-    primary, secondary = _pick_with_fallback(values)
-
-    fit = 58
-    confidence = 55
+    fit = 56
+    confidence = 58
     warning_tags: list[str] = []
     rationale_points: list[str] = []
 
-    # 结构判断
-    if spf_win is not None and handicap < 0 and spf_win <= 1.95:
-        recommendation_label = "强势主导结构（偏胜胜/平胜）"
-        primary = "主胜"
-        secondary = "平"
+    recommendation_label = "结构待观察"
+    primary = "平胜"
+    secondary: str | None = "平平"
+
+    # Rule 1: 主胜低赔率 + 主让球
+    if spf_win is not None and spf_win < 1.85 and handicap < 0:
+        recommendation_label = "结构优势明确"
+        primary, secondary = "胜胜", "平胜"
         fit += 24
-        confidence += 18
-        rationale_points.append("主胜赔率较低且主队让球，结构上偏主导路径")
-    elif spf_draw is not None and spf_win is not None and spf_lose is not None and abs(spf_win - spf_lose) <= 0.3:
-        recommendation_label = "拉扯均衡结构（偏平平/平胜）"
-        primary = "平"
-        secondary = "主胜"
-        fit += 15
-        confidence += 10
-        rationale_points.append("胜负赔率接近，比赛更可能进入拉扯结构")
-    else:
-        recommendation_label = "常规结构"
-        rationale_points.append("赔率结构无明显单边倾斜，走常规推荐路径")
+        confidence += 16
+        rationale_points.append("主胜赔率<1.85 且主队让球，优势兑现路径更集中")
 
-    # 盘口分歧风险
-    if handicap <= -1 and spf_win is not None and spf_win > 2.1:
-        warning_tags.append("深盘分歧")
+    # Rule 2: 赔率接近 + 平局赔率不高
+    if (
+        spf_win is not None
+        and spf_lose is not None
+        and spf_draw is not None
+        and abs(spf_win - spf_lose) <= 0.3
+        and spf_draw <= 3.35
+    ):
+        recommendation_label = "平局拉扯型"
+        primary, secondary = "平平", "平胜"
+        fit += 8
+        confidence -= 4
+        warning_tags.append("拉扯局波动")
+        rationale_points.append("胜负赔率接近且平赔不高，半场僵持概率上升")
+
+    # Rule 3: 深盘分歧
+    if handicap <= -1 and spf_win is not None and spf_win > 2.05:
+        warning_tags.extend(["盘口分歧", "强队热度风险"])
+        fit -= 12
         confidence -= 12
-        fit -= 8
-        rationale_points.append("主队让球较深但主胜赔率不够压低，盘赔存在分歧")
+        rationale_points.append("盘口较深但主胜赔率未同步压低，盘赔分歧明显")
 
-    # 模型一致性
+    # 回避场景 A：双防型对决（以平赔偏低+胜负接近作为近似信号）
+    if (
+        spf_draw is not None
+        and spf_draw <= 2.9
+        and spf_win is not None
+        and spf_lose is not None
+        and abs(spf_win - spf_lose) <= 0.35
+    ):
+        warning_tags.append("双防型低进球风险")
+        fit -= 16
+        confidence -= 10
+
+    # 回避场景 B：强队客场密集赛程风险（近似：客胜低赔+主受让）
+    if handicap > 0.5 and spf_lose is not None and spf_lose < 2.0:
+        warning_tags.append("强队客场体能轮换风险")
+        fit -= 12
+        confidence -= 10
+
+    # 回避场景 C：杯赛/尺度波动（近似：杯赛关键词）
+    if "杯" in league:
+        warning_tags.append("杯赛尺度波动风险")
+        fit -= 8
+        confidence -= 6
+
+    # Rule 4/5: Gemini + ChatGPT 一致性
     gemini_pick = str(row.get("gemini_match_main_pick", "") or "").strip()
     chatgpt_pick = str(row.get("chatgpt_match_main_pick", "") or "").strip()
     if gemini_pick and chatgpt_pick:
-        if gemini_pick == chatgpt_pick:
+        g_struct = _map_direction_to_structure(gemini_pick)
+        c_struct = _map_direction_to_structure(chatgpt_pick)
+        if g_struct and c_struct and g_struct.intersection(c_struct):
             confidence += 10
-            rationale_points.append("Gemini 与 ChatGPT 主方向一致，提升置信度")
-        else:
-            confidence -= 8
+            rationale_points.append("Gemini 与 ChatGPT 方向存在交集，提升置信度")
+        elif gemini_pick != chatgpt_pick:
+            confidence -= 9
             warning_tags.append("模型分歧")
-            rationale_points.append("Gemini 与 ChatGPT 主方向分歧，需防冷")
+            rationale_points.append("Gemini 与 ChatGPT 方向分歧，需控制仓位")
 
-    # 不适配过滤
-    if handicap == 0 and spf_draw is not None and spf_draw <= min(v for _, v in values):
-        warning_tags.append("低比分闷战风险")
-    if "模型分歧" in warning_tags and "深盘分歧" in warning_tags:
-        warning_tags.append("建议保守处理")
-
-    confidence = max(20, min(95, confidence))
+    # 裁剪区间
     fit = max(20, min(95, fit))
-    risk_level = _risk_level(confidence)
-    should_skip = risk_level == "high" and fit < 55
+    confidence = max(20, min(95, confidence))
+    risk = _risk_level(confidence)
 
-    if should_skip:
+    should_skip = False
+    recommendation_type = "单选"
+
+    if fit < 45 or (risk == "high" and len(warning_tags) >= 2):
+        should_skip = True
         recommendation_type = "跳过"
+        primary, secondary = "平平", None
+        recommendation_label = "结构噪音偏高"
+    elif risk == "high":
+        recommendation_type = "防冷"
+        if secondary is None:
+            secondary = "平平"
     elif secondary:
         recommendation_type = "双选"
-    else:
-        recommendation_type = "单选"
 
     if len(rationale_points) < 2:
-        rationale_points.append("建议结合临场阵容与赛前资讯做二次确认")
+        rationale_points.append("建议临场结合阵容、赛前信息二次确认")
 
-    rationale_summary = f"{home_team} vs {away_team}：{recommendation_label}，主推 {primary}" + (
-        f"，次选 {secondary}" if secondary else ""
+    if primary not in STRUCTURE_PICKS:
+        primary = "平胜"
+    if secondary and secondary not in STRUCTURE_PICKS:
+        secondary = None
+
+    rationale_summary = (
+        f"{home_team} vs {away_team}：{recommendation_label}，"
+        f"主推 {primary}{'，次选 ' + secondary if secondary else ''}。"
     )
 
     detailed = {
-        "basic_view": f"主队 {home_team}，客队 {away_team}，让球 {handicap:+g}",
-        "structure_view": recommendation_label,
-        "market_view": f"SPF 主/平/客: {spf_win}/{spf_draw}/{spf_lose}",
-        "risk_notes": "；".join(warning_tags) if warning_tags else "暂无显著风险",
-        "final_verdict": f"{recommendation_type} - {primary}" + (f" + {secondary}" if secondary else ""),
+        "basic_view": f"让球 {handicap:+g}，SPF 主/平/客={spf_win}/{spf_draw}/{spf_lose}",
+        "structure_view": f"聚焦路径：{primary}{' / ' + secondary if secondary else ''}",
+        "market_view": "盘口与赔率已做分歧检测，偏离越大风险越高",
+        "risk_notes": "；".join(dict.fromkeys(warning_tags)) if warning_tags else "暂无显著风险标签",
+        "final_verdict": f"{recommendation_type} | {recommendation_label}",
     }
 
     return StrategyRecommendation(
@@ -197,14 +232,14 @@ def _structure_edge_recommendation(row: pd.Series, strategy_id: str) -> Strategy
         match_id=_build_match_id(row),
         fit_score=fit,
         confidence_score=confidence,
-        risk_level=risk_level,
+        risk_level=risk,
         recommendation_type=recommendation_type,
         recommendation_label=recommendation_label,
         primary_pick=primary,
         secondary_pick=secondary,
         rationale_summary=rationale_summary,
         rationale_points=rationale_points[:4],
-        warning_tags=warning_tags,
+        warning_tags=list(dict.fromkeys(warning_tags)),
         should_skip=should_skip,
         detailed_analysis=detailed,
     )
@@ -233,9 +268,9 @@ def generate_strategy_recommendations(
                 fit_score=0,
                 confidence_score=0,
                 risk_level="high",
-                recommendation_type="Coming Soon",
+                recommendation_type="跳过",
                 recommendation_label="策略开发中",
-                primary_pick="-",
+                primary_pick="平平",
                 secondary_pick=None,
                 rationale_summary="该策略尚未开放。",
                 rationale_points=["Coming Soon"],

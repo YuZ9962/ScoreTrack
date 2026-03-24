@@ -7,8 +7,8 @@ from strategies.registry import StrategyMeta
 
 _STATUS_TEXT = {
     "active": "启用",
-    "beta": "开发中",
-    "disabled": "已停用",
+    "beta": "开发中 · Coming Soon",
+    "disabled": "已停用 · Coming Soon",
 }
 
 
@@ -22,6 +22,7 @@ def render_strategy_selector(strategies: list[StrategyMeta], selected_id: str) -
     for s in strategies:
         mark = "⭐ 默认" if s.is_default else ""
         badge = _STATUS_TEXT.get(s.status, s.status)
-        st.caption(f"{s.name_cn} ({s.name_en}) · 状态: {badge} {mark} · {s.short_description}")
+        active_flag = "**当前方案**" if idx_map[chosen] == s.id else ""
+        st.caption(f"{s.name_cn} ({s.name_en}) · 状态: {badge} {mark} {active_flag} · {s.short_description}")
 
     return idx_map[chosen]
