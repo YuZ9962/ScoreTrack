@@ -59,6 +59,10 @@ def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
         "chatgpt_handicap_win_prob": None,
         "chatgpt_handicap_draw_prob": None,
         "chatgpt_handicap_lose_prob": None,
+        "chatgpt_match_main_pick": None,
+        "chatgpt_match_secondary_pick": None,
+        "chatgpt_handicap_main_pick": None,
+        "chatgpt_handicap_secondary_pick": None,
         "chatgpt_score_1": None,
         "chatgpt_score_2": None,
         "chatgpt_score_3": None,
@@ -71,7 +75,11 @@ def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
 
     # 1) 优先提取固定尾部字段
     tail_main_dir = _extract_label_value(text, "胜平负主方向")
+    tail_match_main = _extract_label_value(text, "胜平负主推")
+    tail_match_secondary = _extract_label_value(text, "胜平负次推")
     tail_hcap_dir = _extract_label_value(text, "让球主方向")
+    tail_hcap_main = _extract_label_value(text, "让球主推")
+    tail_hcap_secondary = _extract_label_value(text, "让球次推")
     tail_s1 = _extract_label_value(text, "比分1")
     tail_s2 = _extract_label_value(text, "比分2")
     tail_s3 = _extract_label_value(text, "比分3")
@@ -90,6 +98,10 @@ def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
 
     if tail_main_dir:
         out["chatgpt_top_direction"] = tail_main_dir
+    out["chatgpt_match_main_pick"] = tail_match_main or tail_main_dir
+    out["chatgpt_match_secondary_pick"] = tail_match_secondary or "无"
+    out["chatgpt_handicap_main_pick"] = tail_hcap_main or tail_hcap_dir
+    out["chatgpt_handicap_secondary_pick"] = tail_hcap_secondary or "无"
 
     if tail_upset_def or tail_upset_prob:
         upset = f"{tail_upset_def or ''} {tail_upset_prob or ''}".strip()
@@ -170,5 +182,10 @@ def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
     # 6) 从尾部补充方向
     if tail_hcap_dir and not out["chatgpt_top_direction"]:
         out["chatgpt_top_direction"] = tail_hcap_dir
+
+    if not out["chatgpt_match_secondary_pick"]:
+        out["chatgpt_match_secondary_pick"] = "无"
+    if not out["chatgpt_handicap_secondary_pick"]:
+        out["chatgpt_handicap_secondary_pick"] = "无"
 
     return out

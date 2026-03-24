@@ -123,3 +123,34 @@ def save_prediction(row: dict[str, Any], base_dir: Path | None = None) -> Path:
     out_df = _ensure_columns(out_df)
     out_df.to_csv(file_path, index=False, encoding="utf-8-sig")
     return file_path
+
+
+def delete_predictions(matches: list[dict[str, str]], base_dir: Path | None = None) -> int:
+    if not matches:
+        return 0
+    file_path = prediction_file(base_dir)
+    if not file_path.exists():
+        return 0
+    df = load_predictions(base_dir)
+    if df.empty:
+        return 0
+
+    keep_mask = pd.Series([True] * len(df))
+    for m in matches:
+        raw_id = str(m.get("raw_id", "") or "").strip()
+        match_no = str(m.get("match_no", "") or "").strip()
+        home = str(m.get("home_team", "") or "").strip()
+        away = str(m.get("away_team", "") or "").strip()
+        if raw_id:
+            keep_mask &= df["raw_id"].astype(str) != raw_id
+        else:
+            keep_mask &= ~(
+                (df["match_no"].astype(str) == match_no)
+                & (df["home_team"].astype(str) == home)
+                & (df["away_team"].astype(str) == away)
+            )
+
+    new_df = df[keep_mask].copy()
+    deleted = len(df) - len(new_df)
+    _ensure_columns(new_df).to_csv(file_path, index=False, encoding="utf-8-sig")
+    return deleted

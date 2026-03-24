@@ -15,11 +15,11 @@ if str(APP_DIR) not in sys.path:
 from components.data_controls import render_date_file_selector, render_fetch_section
 from services.chatgpt_parser import parse_chatgpt_output
 from services.chatgpt_runner import run_chatgpt_prediction
-from services.chatgpt_store import load_chatgpt_predictions, save_chatgpt_prediction
+from services.chatgpt_store import delete_chatgpt_predictions, load_chatgpt_predictions, save_chatgpt_prediction
 from services.gemini_parser import parse_gemini_output, parse_manual_raw_text
 from services.gemini_runner import run_gemini_prediction
 from services.loader import get_data_context, load_matches_by_date
-from services.prediction_store import load_predictions, save_prediction
+from services.prediction_store import delete_predictions, load_predictions, save_prediction
 from services.transforms import normalize_dataframe, sort_by_match_no
 from utils.chatgpt_prompt_builder import build_chatgpt_probability_prompt
 from utils.prompt_builder import build_simple_prediction_prompt
@@ -554,6 +554,58 @@ else:
             st.write(f"状态：{_status_text(pred)}")
             if st.button("手动补录预测", key=f"manual_btn_{r.get('match_no')}_{r.get('raw_id', '')}"):
                 render_manual_dialog(r, selected_date)
+
+st.markdown("---")
+st.markdown("### 手动删除比赛场次")
+delete_labels = [_match_label(row) for _, row in filtered_df.iterrows()]
+delete_indices = st.multiselect(
+    "选择要删除的比赛（可多选）",
+    options=list(range(len(filtered_df))),
+    format_func=lambda i: delete_labels[i],
+)
+confirm_delete = st.checkbox("我已确认删除以上比赛及其 Gemini/ChatGPT 预测记录", value=False)
+if st.button("删除所选比赛", type="secondary"):
+    if not delete_indices:
+        st.warning("请先选择要删除的比赛")
+    elif not confirm_delete:
+        st.warning("请先勾选删除确认")
+    else:
+        to_delete = filtered_df.iloc[delete_indices].copy()
+        keys = [
+            {
+                "raw_id": str(r.get("raw_id", "") or "").strip(),
+                "match_no": str(r.get("match_no", "") or "").strip(),
+                "home_team": str(r.get("home_team", "") or "").strip(),
+                "away_team": str(r.get("away_team", "") or "").strip(),
+            }
+            for _, r in to_delete.iterrows()
+        ]
+
+        target_file = ctx.data_dir / f"{selected_date}_matches.csv"
+        deleted_matches = 0
+        if target_file.exists():
+            src_df = pd.read_csv(target_file)
+            keep_mask = pd.Series([True] * len(src_df))
+            for k in keys:
+                raw_id = k["raw_id"]
+                if raw_id and "raw_id" in src_df.columns:
+                    keep_mask &= src_df["raw_id"].astype(str) != raw_id
+                else:
+                    keep_mask &= ~(
+                        (src_df["match_no"].astype(str) == k["match_no"])
+                        & (src_df["home_team"].astype(str) == k["home_team"])
+                        & (src_df["away_team"].astype(str) == k["away_team"])
+                    )
+            new_df = src_df[keep_mask].copy()
+            deleted_matches = len(src_df) - len(new_df)
+            new_df.to_csv(target_file, index=False, encoding="utf-8-sig")
+
+        deleted_gemini = delete_predictions(keys, ROOT)
+        deleted_chatgpt = delete_chatgpt_predictions(keys, ROOT)
+        st.success(
+            f"删除完成：比赛 {deleted_matches} 场，Gemini 预测 {deleted_gemini} 条，ChatGPT 预测 {deleted_chatgpt} 条"
+        )
+        st.rerun()
 
 st.markdown("---")
 st.markdown("### 当日已生成 Gemini 推荐")

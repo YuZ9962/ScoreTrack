@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 from components.data_controls import render_fetch_section
 from services.loader import get_data_context, load_all_matches, load_chatgpt_predictions, load_results
 from services.prediction_store import load_predictions
-from services.result_evaluator import build_hit_summary, evaluate_predictions
+from services.result_evaluator import build_hit_summary, evaluate_chatgpt_predictions, evaluate_predictions
 from services.transforms import (
     ensure_issue_date_columns,
     filter_by_time_and_league,
@@ -107,6 +107,15 @@ def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
             "让胜平负预测结果",
         ]
     ]
+
+
+def _status_icon(value: object) -> str:
+    text = str(value or "").strip()
+    if text == "命中":
+        return "✅"
+    if text == "未命中":
+        return "❌"
+    return "⏳"
 
 
 st.set_page_config(page_title="统计分析", page_icon="📈", layout="wide")
@@ -210,6 +219,8 @@ for col in show_cols:
 
 sorted_df = sort_by_match_no(eval_df[show_cols].copy())
 display_df = _build_cn_table(sorted_df)
+display_df["胜平负预测结果"] = display_df["胜平负预测结果"].map(_status_icon)
+display_df["让胜平负预测结果"] = display_df["让胜平负预测结果"].map(_status_icon)
 st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 st.markdown("---")
@@ -218,8 +229,15 @@ chatgpt_df = load_chatgpt_predictions(ROOT)
 chatgpt_df = ensure_issue_date_columns(chatgpt_df, source_col="issue_date")
 filtered_chatgpt = filter_by_time_and_league(chatgpt_df, time_mode, time_value, selected_league)
 
-st.metric("ChatGPT 预测总场次", len(filtered_chatgpt))
-if filtered_chatgpt.empty:
+chatgpt_eval_df = evaluate_chatgpt_predictions(filtered_chatgpt, results_df)
+chatgpt_summary = build_hit_summary(chatgpt_eval_df)
+
+g1, g2, g3, g4 = st.columns(4)
+g1.metric("推荐总场次", chatgpt_summary["total"])
+g2.metric("已结束场次", chatgpt_summary["ended"])
+g3.metric("胜平负预测命中率", chatgpt_summary["match_rate"])
+g4.metric("让胜平负预测命中率", chatgpt_summary["handicap_rate"])
+if chatgpt_eval_df.empty:
     st.info("当前筛选条件下暂无 ChatGPT 概率预测数据。")
 else:
     for c in [
@@ -241,21 +259,21 @@ else:
         "chatgpt_top_direction",
         "chatgpt_upset_probability_text",
     ]:
-        if c not in filtered_chatgpt.columns:
-            filtered_chatgpt[c] = None
+        if c not in chatgpt_eval_df.columns:
+            chatgpt_eval_df[c] = None
 
-    cdf = filtered_chatgpt.copy()
+    cdf = chatgpt_eval_df.copy()
     cdf["日期时间"] = pd.to_datetime(cdf["kickoff_time"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
     cdf["比赛序号"] = cdf["match_no"]
     cdf["联赛"] = cdf["league"]
     cdf["主客队"] = cdf["home_team"].astype(str) + " vs " + cdf["away_team"].astype(str)
     cdf["让球"] = cdf["handicap"]
-    cdf["主胜概率"] = cdf["chatgpt_home_win_prob"]
-    cdf["平局概率"] = cdf["chatgpt_draw_prob"]
-    cdf["客胜概率"] = cdf["chatgpt_away_win_prob"]
-    cdf["让胜概率"] = cdf["chatgpt_handicap_win_prob"]
-    cdf["让平概率"] = cdf["chatgpt_handicap_draw_prob"]
-    cdf["让负概率"] = cdf["chatgpt_handicap_lose_prob"]
+    cdf["胜平负"] = cdf.apply(
+        lambda r: _join_main_secondary(r.get("chatgpt_match_main_pick"), r.get("chatgpt_match_secondary_pick")), axis=1
+    )
+    cdf["让胜平负"] = cdf.apply(
+        lambda r: _join_main_secondary(r.get("chatgpt_handicap_main_pick"), r.get("chatgpt_handicap_secondary_pick")), axis=1
+    )
     cdf["推荐比分"] = (
         cdf["chatgpt_score_1"].fillna("").astype(str)
         + "/"
@@ -263,8 +281,13 @@ else:
         + "/"
         + cdf["chatgpt_score_3"].fillna("").astype(str)
     ).str.strip("/")
-    cdf["最大概率方向"] = cdf["chatgpt_top_direction"]
-    cdf["爆冷概率"] = cdf["chatgpt_upset_probability_text"]
+    cdf["概率"] = cdf.apply(
+        lambda r: f"主{r.get('chatgpt_home_win_prob')}% | 平{r.get('chatgpt_draw_prob')}% | 客{r.get('chatgpt_away_win_prob')}%",
+        axis=1,
+    )
+    cdf["比赛实际比分"] = cdf["final_score"]
+    cdf["胜平负预测结果"] = cdf["match_hit_result"].map(_status_icon)
+    cdf["让胜平负预测结果"] = cdf["handicap_hit_result"].map(_status_icon)
 
     cdf = sort_by_match_no(cdf)
     st.dataframe(
@@ -275,17 +298,65 @@ else:
                 "联赛",
                 "主客队",
                 "让球",
-                "主胜概率",
-                "平局概率",
-                "客胜概率",
-                "让胜概率",
-                "让平概率",
-                "让负概率",
+                "胜平负",
+                "让胜平负",
                 "推荐比分",
-                "最大概率方向",
-                "爆冷概率",
+                "概率",
+                "比赛实际比分",
+                "胜平负预测结果",
+                "让胜平负预测结果",
             ]
         ],
         use_container_width=True,
         hide_index=True,
     )
+
+    pie_col1, pie_col2 = st.columns(2)
+    with pie_col1:
+        st.markdown("#### 胜平负概率分布")
+        pie1_df = pd.DataFrame(
+            {
+                "label": ["主胜", "平局", "客胜"],
+                "value": [
+                    pd.to_numeric(cdf["chatgpt_home_win_prob"], errors="coerce").fillna(0).sum(),
+                    pd.to_numeric(cdf["chatgpt_draw_prob"], errors="coerce").fillna(0).sum(),
+                    pd.to_numeric(cdf["chatgpt_away_win_prob"], errors="coerce").fillna(0).sum(),
+                ],
+            }
+        )
+        st.vega_lite_chart(
+            pie1_df,
+            {
+                "mark": {"type": "arc", "innerRadius": 40},
+                "encoding": {
+                    "theta": {"field": "value", "type": "quantitative"},
+                    "color": {"field": "label", "type": "nominal"},
+                    "tooltip": [{"field": "label"}, {"field": "value"}],
+                },
+            },
+            use_container_width=True,
+        )
+    with pie_col2:
+        st.markdown("#### 让胜平负概率分布")
+        pie2_df = pd.DataFrame(
+            {
+                "label": ["让胜", "让平", "让负"],
+                "value": [
+                    pd.to_numeric(cdf["chatgpt_handicap_win_prob"], errors="coerce").fillna(0).sum(),
+                    pd.to_numeric(cdf["chatgpt_handicap_draw_prob"], errors="coerce").fillna(0).sum(),
+                    pd.to_numeric(cdf["chatgpt_handicap_lose_prob"], errors="coerce").fillna(0).sum(),
+                ],
+            }
+        )
+        st.vega_lite_chart(
+            pie2_df,
+            {
+                "mark": {"type": "arc", "innerRadius": 40},
+                "encoding": {
+                    "theta": {"field": "value", "type": "quantitative"},
+                    "color": {"field": "label", "type": "nominal"},
+                    "tooltip": [{"field": "label"}, {"field": "value"}],
+                },
+            },
+            use_container_width=True,
+        )

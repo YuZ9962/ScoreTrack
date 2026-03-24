@@ -22,6 +22,10 @@ CHATGPT_COLUMNS = [
     "chatgpt_handicap_win_prob",
     "chatgpt_handicap_draw_prob",
     "chatgpt_handicap_lose_prob",
+    "chatgpt_match_main_pick",
+    "chatgpt_match_secondary_pick",
+    "chatgpt_handicap_main_pick",
+    "chatgpt_handicap_secondary_pick",
     "chatgpt_score_1",
     "chatgpt_score_2",
     "chatgpt_score_3",
@@ -85,3 +89,34 @@ def save_chatgpt_prediction(row: dict[str, Any], base_dir: Path | None = None) -
     out = _ensure_cols(out)
     out.to_csv(p, index=False, encoding="utf-8-sig")
     return p
+
+
+def delete_chatgpt_predictions(matches: list[dict[str, str]], base_dir: Path | None = None) -> int:
+    if not matches:
+        return 0
+    p = chatgpt_prediction_file(base_dir)
+    if not p.exists():
+        return 0
+    df = load_chatgpt_predictions(base_dir)
+    if df.empty:
+        return 0
+
+    keep_mask = pd.Series([True] * len(df))
+    for m in matches:
+        raw_id = str(m.get("raw_id", "") or "").strip()
+        match_no = str(m.get("match_no", "") or "").strip()
+        home = str(m.get("home_team", "") or "").strip()
+        away = str(m.get("away_team", "") or "").strip()
+        if raw_id:
+            keep_mask &= df["raw_id"].astype(str) != raw_id
+        else:
+            keep_mask &= ~(
+                (df["match_no"].astype(str) == match_no)
+                & (df["home_team"].astype(str) == home)
+                & (df["away_team"].astype(str) == away)
+            )
+
+    new_df = df[keep_mask].copy()
+    deleted = len(df) - len(new_df)
+    _ensure_cols(new_df).to_csv(p, index=False, encoding="utf-8-sig")
+    return deleted
