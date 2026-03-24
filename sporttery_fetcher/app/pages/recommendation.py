@@ -58,7 +58,8 @@ selected_strategy_id = render_strategy_selector(strategies, default_strategy.id)
 selected_strategy = get_strategy(selected_strategy_id) or default_strategy
 
 st.markdown("---")
-render_strategy_detail_panel(selected_strategy)
+with st.expander("查看当前策略说明", expanded=False):
+    render_strategy_detail_panel(selected_strategy)
 
 st.markdown("---")
 st.markdown("### 比赛推荐列表")

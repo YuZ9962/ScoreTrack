@@ -31,9 +31,12 @@ def _norm_prob_triplet(a: Any, b: Any, c: Any) -> tuple[float | None, float | No
     return round(x * scale, 2), round(y * scale, 2), round(z * scale, 2)
 
 
-def _extract_label_value(text: str, label: str) -> str | None:
-    m = re.search(rf"{re.escape(label)}\s*[:：]\s*(.+)", text)
-    return m.group(1).strip() if m else None
+def _extract_label_value(text: str, labels: list[str]) -> str | None:
+    for label in labels:
+        m = re.search(rf"{re.escape(label)}\s*[:：]\s*(.+)", text)
+        if m:
+            return m.group(1).strip()
+    return None
 
 
 def _extract_prob_block(text: str, title: str, keys: list[str]) -> dict[str, float | None]:
@@ -50,6 +53,22 @@ def _extract_prob_block(text: str, title: str, keys: list[str]) -> dict[str, flo
     return out
 
 
+def _normalize_secondary(value: str | None) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return "无"
+    if s.lower() in {"none", "null", "nan", "无"}:
+        return "无"
+    return s
+
+
+def _normalize_main(value: str | None) -> str | None:
+    s = str(value or "").strip()
+    if not s or s.lower() in {"none", "null", "nan"}:
+        return None
+    return s
+
+
 def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
     text = (raw_text or "").strip()
     out = {
@@ -60,9 +79,9 @@ def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
         "chatgpt_handicap_draw_prob": None,
         "chatgpt_handicap_lose_prob": None,
         "chatgpt_match_main_pick": None,
-        "chatgpt_match_secondary_pick": None,
+        "chatgpt_match_secondary_pick": "无",
         "chatgpt_handicap_main_pick": None,
-        "chatgpt_handicap_secondary_pick": None,
+        "chatgpt_handicap_secondary_pick": "无",
         "chatgpt_score_1": None,
         "chatgpt_score_2": None,
         "chatgpt_score_3": None,
@@ -74,17 +93,22 @@ def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
         return out
 
     # 1) 优先提取固定尾部字段
-    tail_main_dir = _extract_label_value(text, "胜平负主方向")
-    tail_match_main = _extract_label_value(text, "胜平负主推")
-    tail_match_secondary = _extract_label_value(text, "胜平负次推")
-    tail_hcap_dir = _extract_label_value(text, "让球主方向")
-    tail_hcap_main = _extract_label_value(text, "让球主推")
-    tail_hcap_secondary = _extract_label_value(text, "让球次推")
-    tail_s1 = _extract_label_value(text, "比分1")
-    tail_s2 = _extract_label_value(text, "比分2")
-    tail_s3 = _extract_label_value(text, "比分3")
-    tail_upset_def = _extract_label_value(text, "爆冷方向定义")
-    tail_upset_prob = _extract_label_value(text, "爆冷概率数值")
+    tail_match_main = _extract_label_value(text, ["胜平负主推", "胜平负主方向"])
+    tail_match_secondary = _extract_label_value(text, ["胜平负次推"])
+    tail_hcap_main = _extract_label_value(text, ["让球主推", "让球主方向"])
+    tail_hcap_secondary = _extract_label_value(text, ["让球次推"])
+    tail_s1 = _extract_label_value(text, ["比分1"])
+    tail_s2 = _extract_label_value(text, ["比分2"])
+    tail_s3 = _extract_label_value(text, ["比分3"])
+    tail_max_dir = _extract_label_value(text, ["最大概率方向", "胜平负主方向", "让球主方向"])
+    tail_upset_def = _extract_label_value(text, ["爆冷方向定义"])
+    tail_upset_prob = _extract_label_value(text, ["爆冷概率数值"])
+
+    out["chatgpt_match_main_pick"] = _normalize_main(tail_match_main)
+    out["chatgpt_match_secondary_pick"] = _normalize_secondary(tail_match_secondary)
+    out["chatgpt_handicap_main_pick"] = _normalize_main(tail_hcap_main)
+    out["chatgpt_handicap_secondary_pick"] = _normalize_secondary(tail_hcap_secondary)
+    out["chatgpt_top_direction"] = _normalize_main(tail_max_dir)
 
     if tail_s1:
         m = _SCORE_PATTERN.search(tail_s1)
@@ -95,13 +119,6 @@ def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
     if tail_s3:
         m = _SCORE_PATTERN.search(tail_s3)
         out["chatgpt_score_3"] = m.group(1) if m else None
-
-    if tail_main_dir:
-        out["chatgpt_top_direction"] = tail_main_dir
-    out["chatgpt_match_main_pick"] = tail_match_main or tail_main_dir
-    out["chatgpt_match_secondary_pick"] = tail_match_secondary or "无"
-    out["chatgpt_handicap_main_pick"] = tail_hcap_main or tail_hcap_dir
-    out["chatgpt_handicap_secondary_pick"] = tail_hcap_secondary or "无"
 
     if tail_upset_def or tail_upset_prob:
         upset = f"{tail_upset_def or ''} {tail_upset_prob or ''}".strip()
@@ -179,13 +196,8 @@ def parse_chatgpt_output(raw_text: str) -> dict[str, Any]:
     summary = re.sub(r"\s+", " ", summary)
     out["chatgpt_summary"] = (summary[:120] + "…") if len(summary) > 121 else summary
 
-    # 6) 从尾部补充方向
-    if tail_hcap_dir and not out["chatgpt_top_direction"]:
-        out["chatgpt_top_direction"] = tail_hcap_dir
-
-    if not out["chatgpt_match_secondary_pick"]:
-        out["chatgpt_match_secondary_pick"] = "无"
-    if not out["chatgpt_handicap_secondary_pick"]:
-        out["chatgpt_handicap_secondary_pick"] = "无"
+    # 6) 主推缺失时从 top direction 回填
+    if not out["chatgpt_match_main_pick"] and out["chatgpt_top_direction"]:
+        out["chatgpt_match_main_pick"] = out["chatgpt_top_direction"]
 
     return out

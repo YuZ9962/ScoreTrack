@@ -56,9 +56,16 @@ def _collect_leagues(match_df: pd.DataFrame, pred_df: pd.DataFrame) -> list[str]
 
 
 
+def _normalize_pick_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "null", "none"}:
+        return ""
+    return text
+
+
 def _join_main_secondary(main_pick: object, secondary_pick: object) -> str:
-    main = str(main_pick or "").strip()
-    secondary = str(secondary_pick or "").strip()
+    main = _normalize_pick_text(main_pick)
+    secondary = _normalize_pick_text(secondary_pick)
     if not main:
         return ""
     if not secondary or secondary == "无":
@@ -313,43 +320,50 @@ else:
         hide_index=True,
     )
 
-    pie_col1, pie_col2 = st.columns(2)
-
-    unique_pairs = (
-        cdf[["home_team", "away_team"]]
-        .fillna("")
-        .astype(str)
-        .drop_duplicates()
+    st.markdown("#### 单场比赛概率分布")
+    single_options = []
+    for idx, r in cdf.iterrows():
+        single_options.append(
+            (
+                idx,
+                f"{r.get('match_no', '-') } | {r.get('league', '-') } | {r.get('home_team', '-') } vs {r.get('away_team', '-')}",
+            )
+        )
+    selected_single_idx = st.selectbox(
+        "选择比赛（用于下方两个饼图）",
+        options=[x[0] for x in single_options],
+        format_func=lambda x: dict(single_options).get(x, str(x)),
     )
-    is_single_match_context = len(unique_pairs) == 1
-    home_name = unique_pairs.iloc[0]["home_team"] if is_single_match_context else ""
-    away_name = unique_pairs.iloc[0]["away_team"] if is_single_match_context else ""
+    selected_row = cdf.loc[selected_single_idx]
 
-    match_labels = semantic_match_labels(home_name, away_name, is_single_match_context)
+    home_name = str(selected_row.get("home_team", "")).strip()
+    away_name = str(selected_row.get("away_team", "")).strip()
+    match_labels = semantic_match_labels(home_name, away_name, True)
     match_values = [
-        pd.to_numeric(cdf["chatgpt_home_win_prob"], errors="coerce").fillna(0).sum(),
-        pd.to_numeric(cdf["chatgpt_draw_prob"], errors="coerce").fillna(0).sum(),
-        pd.to_numeric(cdf["chatgpt_away_win_prob"], errors="coerce").fillna(0).sum(),
+        pd.to_numeric(selected_row.get("chatgpt_home_win_prob"), errors="coerce"),
+        pd.to_numeric(selected_row.get("chatgpt_draw_prob"), errors="coerce"),
+        pd.to_numeric(selected_row.get("chatgpt_away_win_prob"), errors="coerce"),
     ]
     handicap_labels = ["让胜", "让平", "让负"]
     handicap_values = [
-        pd.to_numeric(cdf["chatgpt_handicap_win_prob"], errors="coerce").fillna(0).sum(),
-        pd.to_numeric(cdf["chatgpt_handicap_draw_prob"], errors="coerce").fillna(0).sum(),
-        pd.to_numeric(cdf["chatgpt_handicap_lose_prob"], errors="coerce").fillna(0).sum(),
+        pd.to_numeric(selected_row.get("chatgpt_handicap_win_prob"), errors="coerce"),
+        pd.to_numeric(selected_row.get("chatgpt_handicap_draw_prob"), errors="coerce"),
+        pd.to_numeric(selected_row.get("chatgpt_handicap_lose_prob"), errors="coerce"),
     ]
 
+    pie_col1, pie_col2 = st.columns(2)
     with pie_col1:
         render_semantic_probability_pie(
-            title="胜平负概率分布",
+            title="胜平负概率分布（单场）",
             labels=match_labels,
-            values=match_values,
+            values=[0 if pd.isna(v) else float(v) for v in match_values],
             semantic_keys=["home", "draw", "away"],
         )
 
     with pie_col2:
         render_semantic_probability_pie(
-            title="让胜平负概率分布",
+            title="让胜平负概率分布（单场）",
             labels=handicap_labels,
-            values=handicap_values,
+            values=[0 if pd.isna(v) else float(v) for v in handicap_values],
             semantic_keys=["home", "draw", "away"],
         )
