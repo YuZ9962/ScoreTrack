@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -11,9 +12,10 @@ ROOT = APP_DIR.parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from services.article_store import save_article
+from services.article_store import save_article, update_wechat_upload_status
 from services.loader import get_data_context, load_gemini_predictions_by_date, load_matches_by_date
 from services.transforms import normalize_dataframe
+from services.wechat_api import create_draft, has_wechat_config
 from services.wechat_writer import generate_wechat_article
 
 st.set_page_config(page_title="公众号", page_icon="📝", layout="wide")
@@ -60,7 +62,6 @@ else:
         hide_index=True,
     )
 
-manual_summary: dict[str, str] = {}
 match_inputs: list[tuple[dict, dict]] = []
 
 st.markdown("### Gemini 素材检查")
@@ -84,7 +85,6 @@ for _, row in selected_matches.iterrows():
             height=90,
             key=f"manual_{row.get('match_no')}_{row.get('home_team')}_{row.get('away_team')}",
         )
-        manual_summary[row.get("_match_label")] = txt
         gemini_dict = {
             "gemini_raw_text": txt,
             "gemini_summary": txt,
@@ -138,17 +138,69 @@ if st.button("一键生成公众号文案", type="primary"):
                 "generated_at": result.get("generated_at"),
                 "source_model": result.get("source_model"),
                 "source_analysis_type": "gemini",
+                "wechat_upload_status": "未上传",
+                "wechat_draft_id": None,
+                "wechat_uploaded_at": None,
+                "wechat_error_message": None,
             }
             csv_path, md_path = save_article(record, ROOT)
-            generated.append({
-                **record,
-                "prompt": result.get("prompt", ""),
-                "source_gemini": gemini_dict,
-                "csv_path": str(csv_path),
-                "md_path": str(md_path),
-            })
+            generated.append(
+                {
+                    **record,
+                    "prompt": result.get("prompt", ""),
+                    "source_gemini": gemini_dict,
+                    "csv_path": str(csv_path),
+                    "md_path": str(md_path),
+                }
+            )
 
         st.session_state["wechat_articles"] = generated
+
+st.markdown("---")
+st.markdown("### 微信公众号上传状态")
+if not has_wechat_config():
+    st.warning("未配置 WECHAT_APP_ID / WECHAT_APP_SECRET，当前仅可生成文案，不能上传草稿。")
+
+if st.button("批量上传今天生成的全部文章到草稿", disabled=not has_wechat_config()):
+    author = (os.getenv("WECHAT_AUTHOR") or "金条玩足球").strip() or "金条玩足球"
+    digest = (os.getenv("WECHAT_DEFAULT_DIGEST") or "").strip()
+    enable_upload = (os.getenv("WECHAT_ENABLE_DRAFT_UPLOAD") or "true").strip().lower() == "true"
+    if not enable_upload:
+        st.warning("WECHAT_ENABLE_DRAFT_UPLOAD=false，已禁用上传")
+    else:
+        updated = []
+        for article in st.session_state.get("wechat_articles", []):
+            r = create_draft(
+                title=article.get("article_title", ""),
+                content=article.get("article_body", ""),
+                author=author,
+                digest=digest,
+                thumb_media_id=None,
+                base_dir=ROOT,
+            )
+            if r.get("ok"):
+                article["wechat_upload_status"] = "已上传草稿"
+                article["wechat_draft_id"] = r.get("draft_id")
+                article["wechat_uploaded_at"] = r.get("uploaded_at")
+                article["wechat_error_message"] = ""
+            else:
+                article["wechat_upload_status"] = "上传失败"
+                article["wechat_error_message"] = r.get("error", "")
+
+            update_wechat_upload_status(
+                issue_date=str(article.get("issue_date", "")),
+                match_no=str(article.get("match_no", "")),
+                home_team=str(article.get("home_team", "")),
+                away_team=str(article.get("away_team", "")),
+                status=article.get("wechat_upload_status", "未上传"),
+                draft_id=article.get("wechat_draft_id"),
+                uploaded_at=article.get("wechat_uploaded_at") or datetime.now(timezone.utc).isoformat(),
+                error_message=article.get("wechat_error_message"),
+                base_dir=ROOT,
+            )
+            updated.append(article)
+        st.session_state["wechat_articles"] = updated
+        st.success("批量上传流程已完成，请查看每篇文章状态")
 
 st.markdown("---")
 st.markdown("### 生成结果")
@@ -158,7 +210,14 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
         edited_title = st.text_input("标题", value=article.get("article_title", ""), key=f"title_{i}")
         edited_body = st.text_area("正文（可编辑）", value=article.get("article_body", ""), height=320, key=f"body_{i}")
 
-        col1, col2 = st.columns(2)
+        status = article.get("wechat_upload_status") or "未上传"
+        draft_id = article.get("wechat_draft_id") or "-"
+        uploaded_at = article.get("wechat_uploaded_at") or "-"
+        st.caption(f"上传状态：{status} | 草稿ID：{draft_id} | 上传时间：{uploaded_at}")
+        if article.get("wechat_error_message"):
+            st.error(f"上传失败：{article.get('wechat_error_message')}")
+
+        col1, col2, col3 = st.columns(3)
         with col1:
             st.download_button(
                 "导出 Markdown",
@@ -175,6 +234,54 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                 mime="text/plain",
                 key=f"dl_txt_{i}",
             )
+        with col3:
+            if st.button("上传到公众号草稿", key=f"upload_{i}", disabled=not has_wechat_config()):
+                author = (os.getenv("WECHAT_AUTHOR") or "金条玩足球").strip() or "金条玩足球"
+                digest = (os.getenv("WECHAT_DEFAULT_DIGEST") or "").strip()
+                enable_upload = (os.getenv("WECHAT_ENABLE_DRAFT_UPLOAD") or "true").strip().lower() == "true"
+                if not enable_upload:
+                    st.warning("WECHAT_ENABLE_DRAFT_UPLOAD=false，已禁用上传")
+                else:
+                    r = create_draft(
+                        title=edited_title,
+                        content=edited_body,
+                        author=author,
+                        digest=digest,
+                        thumb_media_id=None,
+                        base_dir=ROOT,
+                    )
+                    if r.get("ok"):
+                        article["wechat_upload_status"] = "已上传草稿"
+                        article["wechat_draft_id"] = r.get("draft_id")
+                        article["wechat_uploaded_at"] = r.get("uploaded_at")
+                        article["wechat_error_message"] = ""
+                        update_wechat_upload_status(
+                            issue_date=str(article.get("issue_date", "")),
+                            match_no=str(article.get("match_no", "")),
+                            home_team=str(article.get("home_team", "")),
+                            away_team=str(article.get("away_team", "")),
+                            status="已上传草稿",
+                            draft_id=str(r.get("draft_id", "")),
+                            uploaded_at=str(r.get("uploaded_at", "")),
+                            error_message="",
+                            base_dir=ROOT,
+                        )
+                        st.success(f"上传成功，草稿ID：{r.get('draft_id')}")
+                    else:
+                        article["wechat_upload_status"] = "上传失败"
+                        article["wechat_error_message"] = r.get("error", "")
+                        update_wechat_upload_status(
+                            issue_date=str(article.get("issue_date", "")),
+                            match_no=str(article.get("match_no", "")),
+                            home_team=str(article.get("home_team", "")),
+                            away_team=str(article.get("away_team", "")),
+                            status="上传失败",
+                            draft_id=None,
+                            uploaded_at=datetime.now(timezone.utc).isoformat(),
+                            error_message=str(r.get("error", "")),
+                            base_dir=ROOT,
+                        )
+                        st.error(f"上传失败：{r.get('error')}")
 
         st.caption(f"保存位置：CSV {article.get('csv_path')} | MD {article.get('md_path')}")
         with st.expander("查看原始 Gemini 分析素材", expanded=False):

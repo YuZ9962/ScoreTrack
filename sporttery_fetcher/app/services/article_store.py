@@ -17,6 +17,10 @@ ARTICLE_COLUMNS = [
     "generated_at",
     "source_model",
     "source_analysis_type",
+    "wechat_upload_status",
+    "wechat_draft_id",
+    "wechat_uploaded_at",
+    "wechat_error_message",
 ]
 
 
@@ -45,17 +49,25 @@ def load_articles(base_dir: Path | None = None) -> pd.DataFrame:
         return pd.DataFrame(columns=ARTICLE_COLUMNS)
 
 
+def _match_mask(df: pd.DataFrame, row: dict[str, Any]) -> pd.Series:
+    return (
+        (df["issue_date"].astype(str) == str(row.get("issue_date", "")))
+        & (df["match_no"].astype(str) == str(row.get("match_no", "")))
+        & (df["home_team"].astype(str) == str(row.get("home_team", "")))
+        & (df["away_team"].astype(str) == str(row.get("away_team", "")))
+    )
+
+
 def save_article(record: dict[str, Any], base_dir: Path | None = None) -> tuple[Path, Path]:
     csv_path = article_csv_file(base_dir)
     existing = load_articles(base_dir)
     row = {k: record.get(k) for k in ARTICLE_COLUMNS}
+    row.setdefault("wechat_upload_status", "未上传")
+    row.setdefault("wechat_draft_id", None)
+    row.setdefault("wechat_uploaded_at", None)
+    row.setdefault("wechat_error_message", None)
 
-    mask = ~(
-        (existing["issue_date"].astype(str) == str(row.get("issue_date", "")))
-        & (existing["match_no"].astype(str) == str(row.get("match_no", "")))
-        & (existing["home_team"].astype(str) == str(row.get("home_team", "")))
-        & (existing["away_team"].astype(str) == str(row.get("away_team", "")))
-    )
+    mask = ~_match_mask(existing, row)
     merged = pd.concat([existing[mask], pd.DataFrame([row])], ignore_index=True)
     _ensure_cols(merged).to_csv(csv_path, index=False, encoding="utf-8-sig")
 
@@ -66,3 +78,39 @@ def save_article(record: dict[str, Any], base_dir: Path | None = None) -> tuple[
     md_path = root / "data" / "articles" / f"{issue_date}_{safe_home}_vs_{safe_away}.md"
     md_path.write_text(f"# {row.get('article_title', '')}\n\n{row.get('article_body', '')}\n", encoding="utf-8")
     return csv_path, md_path
+
+
+def update_wechat_upload_status(
+    *,
+    issue_date: str,
+    match_no: str,
+    home_team: str,
+    away_team: str,
+    status: str,
+    draft_id: str | None,
+    uploaded_at: str | None,
+    error_message: str | None,
+    base_dir: Path | None = None,
+) -> Path:
+    csv_path = article_csv_file(base_dir)
+    df = load_articles(base_dir)
+    if df.empty:
+        return csv_path
+
+    mask = _match_mask(
+        df,
+        {
+            "issue_date": issue_date,
+            "match_no": match_no,
+            "home_team": home_team,
+            "away_team": away_team,
+        },
+    )
+    if mask.any():
+        df.loc[mask, "wechat_upload_status"] = status
+        df.loc[mask, "wechat_draft_id"] = draft_id
+        df.loc[mask, "wechat_uploaded_at"] = uploaded_at
+        df.loc[mask, "wechat_error_message"] = error_message
+
+    _ensure_cols(df).to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return csv_path
