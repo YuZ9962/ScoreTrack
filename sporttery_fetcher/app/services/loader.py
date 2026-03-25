@@ -107,3 +107,12 @@ def load_recommendation_inputs(date_str: str, ctx: DataContext, base_dir: Path |
         chatgpt_df = chatgpt_df[chatgpt_df["issue_date"].astype(str) == str(date_str)].copy()
 
     return matches_df, gemini_df, chatgpt_df
+
+
+def load_gemini_predictions_by_date(date_str: str, base_dir: Path | None = None) -> pd.DataFrame:
+    gemini_df = _load_predictions(base_dir)
+    if gemini_df.empty:
+        return gemini_df
+    if "issue_date" not in gemini_df.columns:
+        return pd.DataFrame()
+    return gemini_df[gemini_df["issue_date"].astype(str) == str(date_str)].copy()
