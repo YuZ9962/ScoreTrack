@@ -14,13 +14,11 @@ class DataContext:
     files: list[Path]
 
 
-
 def get_data_context(base_dir: Path | None = None) -> DataContext:
     base = base_dir or Path(__file__).resolve().parents[2]
     data_dir = base / "data" / "processed"
     files = sorted(data_dir.glob("*_matches.csv"))
     return DataContext(data_dir=data_dir, files=files)
-
 
 
 def available_date_options(ctx: DataContext) -> list[str]:
@@ -31,13 +29,11 @@ def available_date_options(ctx: DataContext) -> list[str]:
     return options
 
 
-
 def get_latest_date(ctx: DataContext) -> str | None:
     options = available_date_options(ctx)
     if not options:
         return None
     return sorted(options)[-1]
-
 
 
 def load_matches_by_date(date_str: str, ctx: DataContext) -> pd.DataFrame:
@@ -51,12 +47,14 @@ def load_matches_by_date(date_str: str, ctx: DataContext) -> pd.DataFrame:
     return df
 
 
+def _manual_match_file(base_dir: Path | None = None) -> Path:
+    root = base_dir or Path(__file__).resolve().parents[2]
+    return root / "data" / "manual" / "history_matches.csv"
 
-def load_all_matches(ctx: DataContext) -> pd.DataFrame:
-    if not ctx.files:
-        return pd.DataFrame()
 
+def load_all_matches(ctx: DataContext, base_dir: Path | None = None) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
+
     for file_path in ctx.files:
         date_part = file_path.name.split("_matches.csv")[0]
         try:
@@ -67,10 +65,22 @@ def load_all_matches(ctx: DataContext) -> pd.DataFrame:
             df["issue_date"] = date_part
         frames.append(df)
 
+    manual_file = _manual_match_file(base_dir)
+    if manual_file.exists():
+        try:
+            manual_df = pd.read_csv(manual_file)
+            if not manual_df.empty:
+                if "issue_date" not in manual_df.columns:
+                    manual_df["issue_date"] = ""
+                if "data_source" not in manual_df.columns:
+                    manual_df["data_source"] = "manual"
+                frames.append(manual_df)
+        except Exception:
+            pass
+
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
-
 
 
 def results_file(base_dir: Path | None = None) -> Path:
@@ -78,7 +88,6 @@ def results_file(base_dir: Path | None = None) -> Path:
     path = root / "data" / "results" / "match_results.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
-
 
 
 def load_results(base_dir: Path | None = None) -> pd.DataFrame:
@@ -95,7 +104,9 @@ def load_chatgpt_predictions(base_dir: Path | None = None) -> pd.DataFrame:
     return _load_chatgpt_predictions(base_dir)
 
 
-def load_recommendation_inputs(date_str: str, ctx: DataContext, base_dir: Path | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_recommendation_inputs(
+    date_str: str, ctx: DataContext, base_dir: Path | None = None
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     matches_df = load_matches_by_date(date_str, ctx)
 
     gemini_df = _load_predictions(base_dir)

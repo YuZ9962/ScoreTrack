@@ -66,6 +66,7 @@ def _match_row(pred_row: pd.Series, result_df: pd.DataFrame) -> pd.Series | None
     match_no = _normalize_pick(pred_row.get("match_no"))
     home_team = _normalize_pick(pred_row.get("home_team"))
     away_team = _normalize_pick(pred_row.get("away_team"))
+    issue_date = _normalize_pick(pred_row.get("issue_date"))
     kickoff_date = _date_from_text(pred_row.get("kickoff_time"))
 
     if raw_id and "raw_id" in result_df.columns:
@@ -73,8 +74,13 @@ def _match_row(pred_row: pd.Series, result_df: pd.DataFrame) -> pd.Series | None
         if not matched.empty:
             return _pick_best_candidate(pred_row, matched)
 
-    if match_no and "match_no" in result_df.columns:
-        matched = result_df[result_df["match_no"].astype(str) == match_no]
+    if match_no and home_team and away_team and "issue_date" in result_df.columns:
+        matched = result_df[
+            (result_df["issue_date"].astype(str) == issue_date)
+            & (result_df["match_no"].astype(str) == match_no)
+            & (result_df["home_team"].astype(str) == home_team)
+            & (result_df["away_team"].astype(str) == away_team)
+        ]
         if not matched.empty:
             return _pick_best_candidate(pred_row, matched)
 
@@ -84,6 +90,11 @@ def _match_row(pred_row: pd.Series, result_df: pd.DataFrame) -> pd.Series | None
             & (result_df["home_team"].astype(str) == home_team)
             & (result_df["away_team"].astype(str) == away_team)
         ]
+        if not matched.empty:
+            return _pick_best_candidate(pred_row, matched)
+
+    if match_no and "match_no" in result_df.columns:
+        matched = result_df[result_df["match_no"].astype(str) == match_no]
         if not matched.empty:
             return _pick_best_candidate(pred_row, matched)
 

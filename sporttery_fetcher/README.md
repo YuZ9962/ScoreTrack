@@ -507,3 +507,39 @@ WECHAT_ENABLE_DRAFT_UPLOAD=true
 ```
 
 > 注意：不要在日志或代码中打印真实 `app_secret` 与 `access_token`。
+
+## 15. 历史补录页面（新增）
+
+新增页面：`app/pages/history_entry.py`（左侧导航：历史补录）。
+
+### 15.1 可补录内容
+
+1. 比赛基础信息（写入统一比赛数据源）
+   - 保存到：`data/manual/history_matches.csv`
+   - 关键字段：`issue_date, match_no, home_team, away_team`（可选 `raw_id`）
+2. Gemini 预测结果
+   - 保存到：`data/predictions/gemini_predictions.csv`
+3. 比赛真实结果（可后补）
+   - 保存到：`data/results/match_results.csv`
+
+所有补录数据默认带来源标记：`data_source=manual`。
+
+### 15.2 覆盖更新规则（避免重复追加）
+
+对同一场比赛执行 Upsert（覆盖更新），键为：
+
+- `issue_date + match_no + home_team + away_team`
+- 若提供 `raw_id`，也会参与匹配
+
+当检测到已有场次时，页面提示：`该场次已存在，将执行覆盖更新`。
+
+### 15.3 Analytics 联动
+
+- Analytics 的比赛数据读取：`data/processed/*_matches.csv` + `data/manual/history_matches.csv`
+- Gemini 预测读取：`data/predictions/gemini_predictions.csv`
+- 赛果读取：`data/results/match_results.csv`
+
+因此手动补录后可直接进入 Gemini 命中率统计：
+- 已结束场次数
+- 胜平负预测命中率（主推/次推命中均算命中）
+- 让胜平负预测命中率（主推/次推命中均算命中）

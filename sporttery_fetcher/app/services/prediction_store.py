@@ -31,6 +31,7 @@ PREDICTION_COLUMNS = [
     "prediction_status",
     "is_manual",
     "prediction_remark",
+    "data_source",
 ]
 
 LEGACY_COLUMN_MAPPING = {
@@ -58,6 +59,8 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["is_manual"] = False
     if "prediction_remark" not in out.columns:
         out["prediction_remark"] = None
+    if "data_source" not in out.columns:
+        out["data_source"] = "auto"
 
     for col in PREDICTION_COLUMNS:
         if col not in out.columns:
@@ -93,6 +96,8 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
         normalized[key] = "" if value is None else str(value).strip()
     if normalized.get("raw_text") in (None, ""):
         normalized["raw_text"] = normalized.get("gemini_raw_text")
+    if not str(normalized.get("data_source") or "").strip():
+        normalized["data_source"] = "auto"
     return normalized
 
 

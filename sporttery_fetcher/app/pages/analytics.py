@@ -100,6 +100,7 @@ def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
     out["比赛实际比分"] = out.get("final_score")
     out["胜平负预测结果"] = out.get("match_hit_result")
     out["让胜平负预测结果"] = out.get("handicap_hit_result")
+    out["数据来源"] = out.get("data_source").fillna("auto")
 
     return out[
         [
@@ -114,6 +115,7 @@ def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
             "比赛实际比分",
             "胜平负预测结果",
             "让胜平负预测结果",
+            "数据来源",
         ]
     ]
 
@@ -189,6 +191,7 @@ metric_col2.metric(league_label, len(filtered_matches))
 
 st.markdown("---")
 st.markdown("### Gemini 推荐分析")
+st.caption("包含自动抓取与手动补录（data_source=manual）的 Gemini 预测数据")
 
 if filtered_preds.empty:
     st.info("当前筛选条件下暂无 Gemini 推荐数据。")
@@ -220,6 +223,7 @@ show_cols = [
     "final_score",
     "match_hit_result",
     "handicap_hit_result",
+    "data_source",
 ]
 
 for col in show_cols:
