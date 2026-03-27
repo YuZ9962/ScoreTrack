@@ -70,6 +70,9 @@ if preview:
         st.success(
             f"写入完成：总计 {stats['total']} 场，新增 {stats['inserted']} 场，覆盖更新 {stats['updated']} 场（data_source=history_fetch）"
         )
+        st.info(
+            f"自动补算：result_match {stats.get('auto_result_match', 0)} 场，result_handicap {stats.get('auto_result_handicap', 0)} 场"
+        )
 
 st.markdown("---")
 st.subheader("B. 手动补录（比赛 + Gemini + 赛果）")

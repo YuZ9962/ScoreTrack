@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +11,8 @@ import pandas as pd
 
 from services.prediction_store import save_prediction
 from src.services.result_cleaner import append_raw_results, load_clean_results
+
+logger = logging.getLogger(__name__)
 
 MATCH_COLUMNS = [
     "issue_date",
@@ -42,6 +46,8 @@ RESULT_COLUMNS = [
     "data_source",
     "updated_at",
 ]
+
+SCORE_RE = re.compile(r"^(\d{1,2})\s*[-:：]\s*(\d{1,2})$")
 
 
 @dataclass
@@ -108,13 +114,27 @@ def _match_key_mask(df: pd.DataFrame, row: dict[str, Any]) -> pd.Series:
     return mask
 
 
-def _parse_outcome(score: str | None) -> str:
+def _normalize_score(score: str | None) -> str:
     text = str(score or "").strip()
-    m = pd.Series([text]).str.extract(r"^(\d+)\s*[-:：]\s*(\d+)$")
-    if m.isna().any(axis=None):
+    m = SCORE_RE.match(text)
+    if not m:
+        return ""
+    return f"{int(m.group(1))}-{int(m.group(2))}"
+
+
+def _score_tuple(score: str | None) -> tuple[int, int] | None:
+    normalized = _normalize_score(score)
+    m = SCORE_RE.match(normalized)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _parse_outcome(score: str | None) -> str:
+    score_tuple = _score_tuple(score)
+    if score_tuple is None:
         return "未开奖"
-    home = int(m.iloc[0, 0])
-    away = int(m.iloc[0, 1])
+    home, away = score_tuple
     if home > away:
         return "主胜"
     if home == away:
@@ -122,18 +142,26 @@ def _parse_outcome(score: str | None) -> str:
     return "客胜"
 
 
-def _parse_handicap_result(score: str | None, handicap: str | None) -> str:
-    text = str(score or "").strip()
-    m = pd.Series([text]).str.extract(r"^(\d+)\s*[-:：]\s*(\d+)$")
-    if m.isna().any(axis=None):
-        return "未开奖"
+def _parse_handicap_int(handicap: str | None) -> int | None:
+    text = str(handicap or "").strip()
+    if not text:
+        return None
+    m = re.search(r"([+-]?\d+)", text)
+    if not m:
+        return None
     try:
-        home = int(m.iloc[0, 0])
-        away = int(m.iloc[0, 1])
-        hcap = int(str(handicap or "0").strip() or "0")
+        return int(m.group(1))
     except Exception:
+        return None
+
+
+def _parse_handicap_result(score: str | None, handicap: str | None) -> str:
+    score_tuple = _score_tuple(score)
+    handicap_int = _parse_handicap_int(handicap)
+    if score_tuple is None or handicap_int is None:
         return "未开奖"
-    adj = home + hcap
+    home, away = score_tuple
+    adj = home + handicap_int
     if adj > away:
         return "让胜"
     if adj == away:
@@ -196,34 +224,98 @@ def upsert_manual_prediction(row: dict[str, Any], base_dir: Path | None = None) 
     return existing
 
 
+def _standardize_history_record(record: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
+    full_score = str(record.get("full_time_score") or record.get("full_score") or "").strip()
+    full_time_score = _normalize_score(full_score)
+
+    row: dict[str, Any] = {
+        "issue_date": str(record.get("issue_date", "") or "").strip(),
+        "match_date": str(record.get("match_date", "") or "").strip(),
+        "match_no": str(record.get("match_no", "") or "").strip(),
+        "league": str(record.get("league", "") or "").strip(),
+        "home_team": str(record.get("home_team", "") or "").strip(),
+        "away_team": str(record.get("away_team", "") or "").strip(),
+        "handicap": str(record.get("handicap", "") or "").strip(),
+        "half_time_score": str(record.get("half_time_score") or record.get("half_score") or "").strip(),
+        "full_time_score": full_time_score,
+        "raw_id": str(record.get("raw_id", "") or "").strip() or None,
+        "source_url": str(record.get("source_url", "") or "").strip(),
+        "scrape_time": str(record.get("scrape_time", "") or "").strip(),
+    }
+
+    original_result_match = str(record.get("result_match", "") or "").strip()
+    original_result_handicap = str(record.get("result_handicap", "") or "").strip()
+
+    calculated_match = _parse_outcome(full_time_score)
+    calculated_handicap = _parse_handicap_result(full_time_score, row.get("handicap"))
+
+    row["result_match"] = original_result_match or calculated_match
+    row["result_handicap"] = original_result_handicap or calculated_handicap
+
+    auto_match = not bool(original_result_match)
+    auto_handicap = not bool(original_result_handicap)
+    return row, auto_match, auto_handicap
+
+
 def upsert_history_fetch_results(records: list[dict[str, Any]], base_dir: Path | None = None) -> dict[str, int]:
+    logger.info("history_entry raw fetched rows=%s", len(records))
+
+    standardized: list[dict[str, Any]] = []
+    auto_result_match_count = 0
+    auto_result_handicap_count = 0
+
+    for r in records:
+        row, auto_match, auto_handicap = _standardize_history_record(r)
+        standardized.append(row)
+        if auto_match:
+            auto_result_match_count += 1
+        if auto_handicap:
+            auto_result_handicap_count += 1
+
+    standardized_columns = sorted({k for row in standardized for k in row.keys()}) if standardized else []
+    logger.info("history_entry standardized columns=%s", standardized_columns)
+    logger.info(
+        "history_entry auto computed counts | result_match=%s result_handicap=%s",
+        auto_result_match_count,
+        auto_result_handicap_count,
+    )
+
+    existed_before = load_clean_results(base_dir)
+    before_count = len(existed_before)
+
+    append_raw_results(standardized, data_source="history_fetch", base_dir=base_dir)
+
+    existed_after = load_clean_results(base_dir)
+    after_count = len(existed_after)
+
     updated = 0
     inserted = 0
-    for r in records:
-        issue_date = str(r.get("issue_date", "") or "").strip()
-        match_no = str(r.get("match_no", "") or "").strip()
-        home = str(r.get("home_team", "") or "").strip()
-        away = str(r.get("away_team", "") or "").strip()
-        handicap = str(r.get("handicap", "") or "").strip()
-        full_score = str(r.get("full_score", "") or "").strip()
-
-        row = {
-            "issue_date": issue_date,
-            "match_no": match_no,
-            "home_team": home,
-            "away_team": away,
-            "raw_id": None,
-            "full_time_score": full_score,
-            "result_match": _parse_outcome(full_score),
-            "result_handicap": _parse_handicap_result(full_score, handicap),
-        }
-        existed = upsert_result(row, base_dir=base_dir, data_source="history_fetch")
+    for row in standardized:
+        if existed_before.empty:
+            inserted += 1
+            continue
+        existed = bool(_match_key_mask(existed_before, row).any())
         if existed:
             updated += 1
         else:
             inserted += 1
 
-    return {"inserted": inserted, "updated": updated, "total": len(records)}
+    logger.info(
+        "history_entry write finished | input=%s inserted=%s updated=%s clean_before=%s clean_after=%s",
+        len(standardized),
+        inserted,
+        updated,
+        before_count,
+        after_count,
+    )
+
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "total": len(records),
+        "auto_result_match": auto_result_match_count,
+        "auto_result_handicap": auto_result_handicap_count,
+    }
 
 
 def load_existing_match(row: dict[str, Any], base_dir: Path | None = None) -> bool:

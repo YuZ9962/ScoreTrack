@@ -29,19 +29,26 @@ RAW_COLUMNS = [
     "away_team",
     "handicap",
     "kickoff_time",
+    "half_time_score",
     "full_time_score",
+    "half_score",
+    "full_score",
     "result_match",
     "result_handicap",
     "raw_result_text",
     "result_generated_at",
     "raw_id",
     "data_source",
+    "source_url",
+    "scrape_time",
+    "match_date",
     "updated_at",
 ]
 
 BAD_COLUMNS = RAW_COLUMNS + ["bad_reason"]
 
 VALID_SCORE_RE = re.compile(r"^\d{1,2}-\d{1,2}$")
+SCORE_ANY_RE = re.compile(r"^(\d{1,2})\s*[-:：]\s*(\d{1,2})$")
 VALID_MATCH = {"主胜", "平", "客胜", "未开奖"}
 VALID_HANDICAP = {"让胜", "让平", "让负", "未开奖"}
 VALID_SOURCE = {"auto_result_fetch", "manual_entry", "history_fetch", "repair_script"}
@@ -101,6 +108,35 @@ def _normalize_text(v: Any) -> str:
     return str(v).strip()
 
 
+def _normalize_score(score: str | None) -> str:
+    text = _normalize_text(score)
+    m = SCORE_ANY_RE.match(text)
+    if not m:
+        return ""
+    return f"{int(m.group(1))}-{int(m.group(2))}"
+
+
+def _parse_score(score: str | None) -> tuple[int, int] | None:
+    text = _normalize_score(score)
+    m = SCORE_ANY_RE.match(text)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _parse_handicap_int(handicap: str | None) -> int | None:
+    text = _normalize_text(handicap)
+    if not text:
+        return None
+    m = re.search(r"([+-]?\d+)", text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
 def _is_invalid_date_like_score(score: str) -> bool:
     if not VALID_SCORE_RE.match(score):
         return True
@@ -112,15 +148,30 @@ def _is_invalid_date_like_score(score: str) -> bool:
     return False
 
 
-def _derive_match(score: str) -> str:
-    if not VALID_SCORE_RE.match(score):
+def _derive_match(score: str | None) -> str:
+    parsed = _parse_score(score)
+    if parsed is None:
         return "未开奖"
-    home, away = [int(x) for x in score.split("-")]
+    home, away = parsed
     if home > away:
         return "主胜"
     if home == away:
         return "平"
     return "客胜"
+
+
+def _derive_handicap_result(score: str | None, handicap: str | None) -> str:
+    parsed = _parse_score(score)
+    hcap = _parse_handicap_int(handicap)
+    if parsed is None or hcap is None:
+        return "未开奖"
+    home, away = parsed
+    adj = home + hcap
+    if adj > away:
+        return "让胜"
+    if adj == away:
+        return "让平"
+    return "让负"
 
 
 def _raw_text_indicates_unopened(raw_result_text: str) -> bool:
@@ -161,21 +212,44 @@ def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, 
     out["home_team"] = _normalize_text(out.get("home_team"))
     out["away_team"] = _normalize_text(out.get("away_team"))
     out["raw_id"] = _normalize_text(out.get("raw_id")) or None
-    out["full_time_score"] = _normalize_text(out.get("full_time_score"))
     out["raw_result_text"] = _normalize_text(out.get("raw_result_text"))
+    out["handicap"] = _normalize_text(out.get("handicap"))
+
+    # 字段别名兼容：history 抓取常见 full_score / half_score
+    full_time_score = _normalize_text(out.get("full_time_score"))
+    if not full_time_score:
+        full_time_score = _normalize_text(out.get("full_score"))
+    full_time_score = _normalize_score(full_time_score)
+
+    half_time_score = _normalize_text(out.get("half_time_score"))
+    if not half_time_score:
+        half_time_score = _normalize_text(out.get("half_score"))
+    out["half_time_score"] = half_time_score
+    out["full_time_score"] = full_time_score
 
     src = _normalize_text(out.get("data_source")) or default_source
     out["data_source"] = src if src in VALID_SOURCE else default_source
     out["updated_at"] = _normalize_text(out.get("updated_at")) or _now_iso()
+
+    if not out["issue_date"]:
+        bad = {**out, "bad_reason": "issue_date 为空"}
+        return None, bad, False
+    if not out["match_no"]:
+        bad = {**out, "bad_reason": "match_no 为空"}
+        return None, bad, False
+    if not out["home_team"] or not out["away_team"]:
+        bad = {**out, "bad_reason": "home_team 或 away_team 为空"}
+        return None, bad, False
 
     key_type, _ = _row_key(out)
     if key_type == "invalid":
         bad = {**out, "bad_reason": "唯一键缺失(raw_id/match_no+issue_date/match_no+teams)"}
         return None, bad, False
 
-    score = out["full_time_score"]
     result_match = _normalize_text(out.get("result_match"))
     result_handicap = _normalize_text(out.get("result_handicap"))
+    score = out["full_time_score"]
+
     is_unopened = _is_unopened_record(
         score=score,
         result_match=result_match,
@@ -198,15 +272,24 @@ def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, 
         }
         return clean, None, True
 
-    if not score or _is_invalid_date_like_score(score):
-        bad = {**out, "bad_reason": f"full_time_score 非法或疑似日期片段: {score}"}
+    if not score:
+        bad = {**out, "bad_reason": "无法解析 full_time_score"}
+        return None, bad, False
+    if _is_invalid_date_like_score(score):
+        bad = {**out, "bad_reason": f"比分字段格式非法: {score}"}
         return None, bad, False
 
-    if result_match not in VALID_MATCH:
+    if result_match not in VALID_MATCH or result_match == "未开奖":
         result_match = _derive_match(score)
+    if result_match == "未开奖":
+        bad = {**out, "bad_reason": "无法计算 result_match"}
+        return None, bad, False
 
-    if result_handicap not in VALID_HANDICAP:
-        result_handicap = "未开奖"
+    if result_handicap not in VALID_HANDICAP or result_handicap == "未开奖":
+        result_handicap = _derive_handicap_result(score, out.get("handicap"))
+    if result_handicap == "未开奖":
+        bad = {**out, "bad_reason": "无法计算 result_handicap"}
+        return None, bad, False
 
     clean = {
         "issue_date": out["issue_date"],
@@ -250,7 +333,7 @@ def _count_unopened_rows(raw_df: pd.DataFrame) -> int:
         return 0
     count = 0
     for _, row in raw_df.iterrows():
-        score = _normalize_text(row.get("full_time_score"))
+        score = _normalize_score(row.get("full_time_score") or row.get("full_score"))
         result_match = _normalize_text(row.get("result_match"))
         result_handicap = _normalize_text(row.get("result_handicap"))
         raw_result_text = _normalize_text(row.get("raw_result_text"))
@@ -291,12 +374,14 @@ def rebuild_clean_results(base_dir: Path | None = None, source_mode: str = "repa
     bad_df.to_csv(paths["bad"], index=False, encoding="utf-8-sig")
     clean_df.to_csv(paths["legacy"], index=False, encoding="utf-8-sig")
 
+    bad_samples = bad_df.head(3)[["match_no", "bad_reason"]].to_dict("records") if not bad_df.empty else []
     logger.info(
-        "result_cleaner rebuild finished | raw=%s clean=%s bad=%s unopened=%s | raw_path=%s clean_path=%s bad_path=%s",
+        "result_cleaner rebuild finished | raw=%s clean=%s bad=%s unopened=%s | bad_samples=%s | raw_path=%s clean_path=%s bad_path=%s",
         len(raw_df),
         len(clean_df),
         len(bad_df),
         unopened_rows,
+        bad_samples,
         paths["raw"],
         paths["clean"],
         paths["bad"],
@@ -314,7 +399,7 @@ def append_raw_results(records: list[dict[str, Any]], data_source: str, base_dir
     paths = result_paths(base_dir)
     src = data_source if data_source in VALID_SOURCE else "repair_script"
 
-    normalized_raw = []
+    normalized_raw: list[dict[str, Any]] = []
     for r in records:
         out = {k: r.get(k) for k in RAW_COLUMNS}
         out["data_source"] = src
@@ -323,7 +408,16 @@ def append_raw_results(records: list[dict[str, Any]], data_source: str, base_dir
 
     new_df = pd.DataFrame(normalized_raw, columns=RAW_COLUMNS)
     old_df = _read_csv(paths["raw"], RAW_COLUMNS)
-    merged = pd.concat([old_df, new_df], ignore_index=True)
+
+    if old_df.empty:
+        merged = new_df.copy()
+    elif new_df.empty:
+        merged = old_df.copy()
+    else:
+        old_aligned = old_df.reindex(columns=RAW_COLUMNS)
+        new_aligned = new_df.reindex(columns=RAW_COLUMNS)
+        merged = pd.concat([old_aligned, new_aligned], ignore_index=True)
+
     merged.to_csv(paths["raw"], index=False, encoding="utf-8-sig")
 
     stats = rebuild_clean_results(base_dir, source_mode=src)

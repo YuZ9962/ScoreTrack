@@ -53,6 +53,21 @@ def _manual_match_file(base_dir: Path | None = None) -> Path:
     return root / "data" / "manual" / "history_matches.csv"
 
 
+def _concat_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    valid = [f for f in frames if isinstance(f, pd.DataFrame) and not f.empty]
+    if not valid:
+        return pd.DataFrame()
+    all_cols: list[str] = []
+    for frame in valid:
+        for col in frame.columns:
+            if col not in all_cols:
+                all_cols.append(col)
+    aligned = [frame.reindex(columns=all_cols) for frame in valid]
+    if len(aligned) == 1:
+        return aligned[0].reset_index(drop=True)
+    return pd.concat(aligned, ignore_index=True)
+
+
 def load_all_matches(ctx: DataContext, base_dir: Path | None = None) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
 
@@ -79,9 +94,7 @@ def load_all_matches(ctx: DataContext, base_dir: Path | None = None) -> pd.DataF
         except Exception:
             pass
 
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    return _concat_frames(frames)
 
 
 def results_file(base_dir: Path | None = None) -> Path:
