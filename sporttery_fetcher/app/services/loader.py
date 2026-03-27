@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 from services.chatgpt_store import load_chatgpt_predictions as _load_chatgpt_predictions
 from services.prediction_store import load_predictions as _load_predictions
-from services.result_cleaner import load_clean_results
+from src.services.result_cleaner import load_clean_results
 
 
 @dataclass

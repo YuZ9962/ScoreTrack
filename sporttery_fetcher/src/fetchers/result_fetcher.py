@@ -14,7 +14,7 @@ from config.settings import settings
 from src.utils.http import HTTPClient
 from src.utils.logger import get_logger
 from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches
-from app.services.result_cleaner import append_raw_results
+from src.services.result_cleaner import append_raw_results
 
 logger = get_logger("result_fetcher")
 
