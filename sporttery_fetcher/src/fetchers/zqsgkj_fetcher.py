@@ -47,10 +47,30 @@ OUTPUT_COLUMNS = [
     "scrape_time",
 ]
 
+TABLE_HINT_KEYWORDS = ["赛事编号", "主队", "客队", "全场比分", "胜", "平", "负"]
+
 
 def _target_weekday_prefix(issue_date: str) -> str:
     d = datetime.strptime(issue_date, "%Y-%m-%d").date()
     return WEEKDAY_PREFIX[d.weekday()]
+
+
+def _debug_snapshot_path(issue_date: str, page_no: int) -> Path:
+    debug_dir = settings.base_dir / "data" / "raw" / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    return debug_dir / f"result_query_{issue_date}_page{page_no}.html"
+
+
+def _save_page_snapshot(page: Any, issue_date: str, page_no: int) -> Path | None:
+    try:
+        content = page.content()
+        path = _debug_snapshot_path(issue_date, page_no)
+        path.write_text(content, encoding="utf-8")
+        logger.info("已保存查询快照 path=%s html_len=%s", path, len(content))
+        return path
+    except Exception:
+        logger.exception("保存查询快照失败")
+        return None
 
 
 def _scroll_to_bottom(page: Any) -> int:
@@ -109,17 +129,21 @@ def _row_to_record(issue_date: str, cols: list[str]) -> dict[str, str]:
     }
 
 
-def _table_signature(page: Any) -> str:
+def _table_signature(page: Any, table_locator: Any | None = None) -> str:
+    text = ""
     try:
-        table_text = page.locator("table").first.inner_text(timeout=5000)
+        if table_locator is not None:
+            text = table_locator.inner_text(timeout=5000)
+        else:
+            text = page.locator("table").first.inner_text(timeout=5000)
     except Exception:
-        table_text = ""
-    if not table_text:
+        text = ""
+    if not text:
         try:
-            table_text = page.locator("tbody").first.inner_text(timeout=5000)
+            text = page.locator("tbody").first.inner_text(timeout=5000)
         except Exception:
-            table_text = ""
-    return hashlib.md5(table_text.encode("utf-8", errors="ignore")).hexdigest()
+            text = ""
+    return hashlib.md5(text.encode("utf-8", errors="ignore")).hexdigest()
 
 
 def _extract_current_page_no(page: Any) -> str:
@@ -169,12 +193,92 @@ def _extract_total_pages_hint(page: Any) -> int | None:
     return max(values)
 
 
-def _parse_current_page_rows(page: Any, issue_date: str) -> list[dict[str, str]]:
-    page_rows: list[dict[str, str]] = []
-    tr_nodes = page.locator("tr")
-    total = tr_nodes.count()
-    for i in range(total):
-        tr = tr_nodes.nth(i)
+def _collect_table_debug(page: Any) -> list[dict[str, Any]]:
+    table_infos: list[dict[str, Any]] = []
+    tables = page.locator("table")
+    try:
+        table_count = tables.count()
+    except Exception:
+        table_count = 0
+
+    for idx in range(table_count):
+        table = tables.nth(idx)
+        try:
+            header = table.locator("thead").first.inner_text(timeout=800).strip()
+        except Exception:
+            header = ""
+        if not header:
+            try:
+                first_row = table.locator("tr").first.inner_text(timeout=800).strip()
+                header = first_row
+            except Exception:
+                header = ""
+
+        samples: list[str] = []
+        try:
+            body_rows = table.locator("tbody tr")
+            body_count = body_rows.count()
+            for i in range(min(3, body_count)):
+                samples.append(body_rows.nth(i).inner_text(timeout=800).strip())
+        except Exception:
+            try:
+                rows = table.locator("tr")
+                row_count = rows.count()
+                for i in range(min(3, max(0, row_count - 1))):
+                    samples.append(rows.nth(i + 1).inner_text(timeout=800).strip())
+            except Exception:
+                pass
+
+        joined = f"{header} {' '.join(samples)}"
+        score = sum(1 for kw in TABLE_HINT_KEYWORDS if kw in joined)
+        table_infos.append({"index": idx, "header": header, "samples": samples, "score": score})
+
+    logger.info("查询后命中的 table 数量=%s", table_count)
+    for info in table_infos:
+        logger.info(
+            "table[%s] score=%s header=%s sample_rows=%s",
+            info["index"],
+            info["score"],
+            info["header"],
+            info["samples"],
+        )
+    return table_infos
+
+
+def _select_results_table(page: Any) -> tuple[Any | None, int | None]:
+    infos = _collect_table_debug(page)
+    if not infos:
+        return None, None
+
+    best = sorted(infos, key=lambda x: (x["score"], len(x["samples"])), reverse=True)[0]
+    if best["score"] <= 0:
+        return None, None
+
+    idx = int(best["index"])
+    table = page.locator("table").nth(idx)
+    logger.info("当前实际选中的 table 索引=%s score=%s", idx, best["score"])
+    return table, idx
+
+
+def _parse_rows_from_table(table: Any, issue_date: str) -> list[dict[str, str]]:
+    rows_out: list[dict[str, str]] = []
+
+    # 优先 tbody tr；若没有则退化到 tr
+    row_locator = table.locator("tbody tr")
+    try:
+        row_count = row_locator.count()
+    except Exception:
+        row_count = 0
+
+    if row_count == 0:
+        row_locator = table.locator("tr")
+        try:
+            row_count = row_locator.count()
+        except Exception:
+            row_count = 0
+
+    for i in range(row_count):
+        tr = row_locator.nth(i)
         td_nodes = tr.locator("td")
         td_count = td_nodes.count()
         if td_count < 9:
@@ -184,10 +288,25 @@ def _parse_current_page_rows(page: Any, issue_date: str) -> list[dict[str, str]]
         if not MATCH_NO_RE.match(match_no):
             continue
         try:
-            page_rows.append(_row_to_record(issue_date, cols))
+            rows_out.append(_row_to_record(issue_date, cols))
         except Exception:
             logger.exception("解析单行失败，已跳过 row_index=%s", i)
-    return page_rows
+
+    return rows_out
+
+
+def _parse_current_page_rows(page: Any, issue_date: str) -> tuple[list[dict[str, str]], str]:
+    table, table_idx = _select_results_table(page)
+    if table is None:
+        return [], "no_result_table"
+    rows = _parse_rows_from_table(table, issue_date)
+    return rows, f"table_index={table_idx}"
+
+
+def _first_match_no(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return ""
+    return str(rows[0].get("match_no", "") or "").strip()
 
 
 def _find_next_button(page: Any) -> Any | None:
@@ -196,6 +315,10 @@ def _find_next_button(page: Any) -> Any | None:
         "button:has-text('下一页')",
         "a:has-text('下页')",
         "button:has-text('下页')",
+        "a[aria-label*='下一页']",
+        "button[aria-label*='下一页']",
+        "a[title*='下一页']",
+        "button[title*='下一页']",
         ".pagination a:has-text('>')",
         ".page a:has-text('>')",
         "li.next a",
@@ -209,19 +332,19 @@ def _find_next_button(page: Any) -> Any | None:
                 aria_disabled = (loc.get_attribute("aria-disabled") or "").lower()
                 if "disabled" in class_name or aria_disabled in {"true", "1"}:
                     continue
-                text = (loc.inner_text(timeout=500) or "").strip()
-                if text in {"", "下一页", "下页", ">", "›", "»"} or "下一页" in text or "下页" in text:
-                    return loc
+                return loc
         except Exception:
             continue
     return None
 
 
-def _click_next_page(page: Any, previous_signature: str) -> bool:
+def _click_next_page(page: Any, previous_signature: str, before_first_match_no: str) -> tuple[bool, str, str]:
     next_btn = _find_next_button(page)
     if next_btn is None:
-        return False
+        logger.info("分页识别：未找到下一页控件")
+        return False, "", ""
 
+    logger.info("分页识别：找到下一页控件，准备点击")
     try:
         next_btn.scroll_into_view_if_needed(timeout=2000)
     except Exception:
@@ -234,22 +357,32 @@ def _click_next_page(page: Any, previous_signature: str) -> bool:
             next_btn.click(force=True, timeout=5000)
         except Exception:
             logger.warning("点击下一页失败，停止翻页")
-            return False
+            return False, "", ""
 
-    # 等待页面变化（签名变化）
     changed = False
+    after_signature = ""
     for _ in range(12):
         page.wait_for_timeout(600)
-        new_signature = _table_signature(page)
-        if new_signature and new_signature != previous_signature:
+        after_signature = _table_signature(page)
+        if after_signature and after_signature != previous_signature:
             changed = True
             break
 
-    if not changed:
-        logger.warning("点击下一页后页面内容未变化，停止翻页，避免死循环")
-        return False
+    # 尝试解析点击后的首条 match_no，用于日志
+    page_rows_after, _ = _parse_current_page_rows(page, issue_date="")
+    after_first_match_no = _first_match_no(page_rows_after)
+    logger.info(
+        "翻页前后首条match_no before=%s after=%s 页面内容变化=%s",
+        before_first_match_no,
+        after_first_match_no,
+        changed,
+    )
 
-    return True
+    if not changed and (after_first_match_no == before_first_match_no):
+        logger.warning("点击下一页后页面内容未变化，停止翻页，避免死循环")
+        return False, after_first_match_no, after_signature
+
+    return True, after_first_match_no, after_signature
 
 
 def _dedup_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -287,9 +420,10 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
         page.locator("#start_date").fill(start_date)
         page.locator("#end_date").fill(end_date)
         page.get_by_text("开始查询").first.click()
-        page.wait_for_timeout(1800)
-        page.wait_for_load_state("networkidle", timeout=max(10000, settings.request_timeout * 1000))
+        page.wait_for_timeout(2200)
+        page.wait_for_load_state("networkidle", timeout=max(12000, settings.request_timeout * 1000))
 
+        _save_page_snapshot(page, issue_date, page_no=1)
         total_pages_hint = _extract_total_pages_hint(page)
         logger.info("识别到总分页数(提示)=%s", total_pages_hint if total_pages_hint is not None else "未知")
 
@@ -301,8 +435,24 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
                 logger.info("抓取第%s页(页码标识=%s)", page_index, current_page_no)
 
                 _scroll_to_bottom(page)
-                page_rows = _parse_current_page_rows(page, issue_date)
-                logger.info("抓取第%s页，原始比赛行数=%s", page_index, len(page_rows))
+                page_rows, parse_hint = _parse_current_page_rows(page, issue_date)
+                logger.info("抓取第%s页，原始比赛行数=%s parse_hint=%s", page_index, len(page_rows), parse_hint)
+
+                # 首次解析为 0 时，做一次增强等待+重新识别+快照，不立即判定无数据
+                if page_index == 1 and len(page_rows) == 0:
+                    logger.warning("第1页解析为0行，触发增强重试与候选表重识别")
+                    page.wait_for_timeout(2500)
+                    _save_page_snapshot(page, issue_date, page_no=1)
+                    _scroll_to_bottom(page)
+                    page_rows_retry, parse_hint_retry = _parse_current_page_rows(page, issue_date)
+                    logger.info(
+                        "第1页重试后原始比赛行数=%s parse_hint=%s",
+                        len(page_rows_retry),
+                        parse_hint_retry,
+                    )
+                    if len(page_rows_retry) > len(page_rows):
+                        page_rows = page_rows_retry
+
                 all_rows.extend(page_rows)
 
                 signature = _table_signature(page)
@@ -311,16 +461,25 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
                     break
                 visited_signatures.add(signature)
 
+                # 第1页都没有有效行时，仍尝试一次下一页判断；若无变化则自然结束
+                before_first_no = _first_match_no(page_rows)
+
                 if page_index >= MAX_PAGINATION_PAGES:
                     logger.warning("达到最大翻页保护上限=%s，停止翻页", MAX_PAGINATION_PAGES)
                     break
 
-                moved = _click_next_page(page, signature)
+                moved, after_first_no, after_signature = _click_next_page(page, signature, before_first_no)
                 if not moved:
                     logger.info("未检测到可用下一页或翻页无变化，翻页结束")
                     break
 
-                page.wait_for_load_state("networkidle", timeout=max(8000, settings.request_timeout * 1000))
+                page.wait_for_load_state("networkidle", timeout=max(9000, settings.request_timeout * 1000))
+                logger.info(
+                    "翻页成功：before_first_match_no=%s after_first_match_no=%s signature_changed=%s",
+                    before_first_no,
+                    after_first_no,
+                    bool(after_signature and after_signature != signature),
+                )
             except Exception:
                 logger.exception("解析分页时发生异常，已停止后续翻页")
                 break
@@ -329,12 +488,14 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
 
     logger.info("全部分页合并后比赛行数=%s", len(all_rows))
 
-    filtered = [r for r in all_rows if str(r.get("match_no", "")).startswith(target_prefix)]
+    deduped = _dedup_records(all_rows)
+    logger.info("去重后比赛数=%s", len(deduped))
+
+    filtered = [r for r in deduped if str(r.get("match_no", "")).startswith(target_prefix)]
     logger.info("weekday 前缀过滤后的比赛数=%s", len(filtered))
 
-    deduped = _dedup_records(filtered)
-    logger.info("去重后最终比赛数=%s", len(deduped))
-    return deduped
+    logger.info("去重后最终比赛数=%s", len(filtered))
+    return filtered
 
 
 def save_zqsgkj_results(issue_date: str, records: list[dict[str, str]], base_dir: Path | None = None) -> tuple[Path, Path]:
