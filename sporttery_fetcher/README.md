@@ -543,3 +543,39 @@ WECHAT_ENABLE_DRAFT_UPLOAD=true
 - 已结束场次数
 - 胜平负预测命中率（主推/次推命中均算命中）
 - 让胜平负预测命中率（主推/次推命中均算命中）
+
+## 16. Analytics 与历史补录职责边界（本次调整）
+
+### 16.1 Analytics 页面职责（恢复）
+- 保留原有分析/展示能力：
+  - 时间与联赛筛选
+  - Gemini 推荐分析与命中率统计
+  - ChatGPT 概率分析、表格、饼图
+  - `更新比赛结果` 按钮（不再承载历史 issue_date 抓取入口）
+- Analytics 只做展示与统计，不承担历史补录操作。
+
+### 16.2 History Entry 页面职责（集中）
+`app/pages/history_entry.py` 统一承担历史补录能力：
+- 手动补录历史比赛基础信息
+- 手动补录 Gemini 预测
+- 手动补录真实赛果
+- 按 issue_date 抓取官方历史赛果（zqsgkj）并预览后写入
+
+### 16.3 按 issue_date 抓取规则
+- 官方页面：`https://www.sporttery.cn/jc/zqsgkj/`
+- 使用 Playwright：
+  1. 填 `#start_date = issue_date`
+  2. 填 `#end_date = issue_date + 1 day`
+  3. 点击“开始查询”
+  4. 滚动到底直到高度稳定
+  5. 解析比赛行并按 `周X` 编号前缀过滤
+- 输出字段固定：
+  `issue_date,match_date,match_no,league,home_team,away_team,handicap,half_score,full_score,spf_win,spf_draw,spf_lose,source_url,scrape_time`
+
+### 16.4 数据写入
+- 手动补录比赛基础信息：`data/manual/history_matches.csv`
+- 手动补录 Gemini 预测：`data/predictions/gemini_predictions.csv`
+- 手动/抓取赛果：`data/results/match_results.csv`
+- 来源标记：
+  - 手动补录：`data_source=manual`
+  - 历史抓取写入：`data_source=history_fetch`

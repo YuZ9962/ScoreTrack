@@ -135,25 +135,14 @@ st.title("📈 统计分析")
 ctx = get_data_context(ROOT)
 render_fetch_section(ROOT)
 
-result_col1, result_col2 = st.columns([2, 1])
-with result_col1:
-    selected_result_date = st.date_input("赛果日期", value=pd.Timestamp.now().date()).isoformat()
-with result_col2:
-    st.write("")
-    st.write("")
-    update_result_clicked = st.button("更新比赛结果")
-
-if update_result_clicked:
-    with st.spinner(f"正在抓取 {selected_result_date} 的官方赛果并更新..."):
+if st.button("更新比赛结果"):
+    with st.spinner("正在抓取官方赛果并更新..."):
         try:
-            result = fetch_and_save_results(ROOT, issue_date=selected_result_date)
+            result = fetch_and_save_results(ROOT)
             if result.get("ok"):
-                st.success(
-                    f"赛果更新完成（{selected_result_date}），方式={result.get('mode')}，解析 {result.get('parsed_rows')} 场，累计写入 {result.get('written_rows')} 场"
-                )
-                st.rerun()
+                st.success(f"赛果更新完成，共更新 {result.get('parsed_rows')} 场")
             else:
-                st.warning(f"未抓取到 {selected_result_date} 的赛果，请检查日期或解析逻辑")
+                st.warning("未抓取到赛果，请检查开奖页解析逻辑")
         except Exception:
             st.error("更新比赛结果失败，请稍后重试")
 

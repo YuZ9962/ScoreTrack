@@ -107,6 +107,39 @@ def _match_key_mask(df: pd.DataFrame, row: dict[str, Any]) -> pd.Series:
     return mask
 
 
+def _parse_outcome(score: str | None) -> str:
+    text = str(score or "").strip()
+    m = pd.Series([text]).str.extract(r"^(\d+)\s*[-:：]\s*(\d+)$")
+    if m.isna().any(axis=None):
+        return "未开奖"
+    home = int(m.iloc[0, 0])
+    away = int(m.iloc[0, 1])
+    if home > away:
+        return "主胜"
+    if home == away:
+        return "平"
+    return "客胜"
+
+
+def _parse_handicap_result(score: str | None, handicap: str | None) -> str:
+    text = str(score or "").strip()
+    m = pd.Series([text]).str.extract(r"^(\d+)\s*[-:：]\s*(\d+)$")
+    if m.isna().any(axis=None):
+        return "未开奖"
+    try:
+        home = int(m.iloc[0, 0])
+        away = int(m.iloc[0, 1])
+        hcap = int(str(handicap or "0").strip() or "0")
+    except Exception:
+        return "未开奖"
+    adj = home + hcap
+    if adj > away:
+        return "让胜"
+    if adj == away:
+        return "让平"
+    return "让负"
+
+
 def upsert_manual_match(row: dict[str, Any], base_dir: Path | None = None) -> bool:
     path = manual_matches_file(base_dir)
     df = _load_csv(path, MATCH_COLUMNS)
@@ -130,12 +163,12 @@ def upsert_manual_match(row: dict[str, Any], base_dir: Path | None = None) -> bo
     return existed
 
 
-def upsert_result(row: dict[str, Any], base_dir: Path | None = None) -> bool:
+def upsert_result(row: dict[str, Any], base_dir: Path | None = None, data_source: str = "manual") -> bool:
     path = _results_file(base_dir)
     df = _load_csv(path, RESULT_COLUMNS)
 
     normalized = {k: row.get(k) for k in RESULT_COLUMNS}
-    normalized["data_source"] = "manual"
+    normalized["data_source"] = data_source
     normalized["updated_at"] = _now_iso()
 
     mask = _match_key_mask(df, normalized)
@@ -151,6 +184,36 @@ def upsert_manual_prediction(row: dict[str, Any], base_dir: Path | None = None) 
     existing = load_existing_prediction(row, base_dir)
     save_prediction({**row, "data_source": "manual", "prediction_source": "manual_user", "is_manual": True}, base_dir)
     return existing
+
+
+def upsert_history_fetch_results(records: list[dict[str, Any]], base_dir: Path | None = None) -> dict[str, int]:
+    updated = 0
+    inserted = 0
+    for r in records:
+        issue_date = str(r.get("issue_date", "") or "").strip()
+        match_no = str(r.get("match_no", "") or "").strip()
+        home = str(r.get("home_team", "") or "").strip()
+        away = str(r.get("away_team", "") or "").strip()
+        handicap = str(r.get("handicap", "") or "").strip()
+        full_score = str(r.get("full_score", "") or "").strip()
+
+        row = {
+            "issue_date": issue_date,
+            "match_no": match_no,
+            "home_team": home,
+            "away_team": away,
+            "raw_id": None,
+            "full_time_score": full_score,
+            "result_match": _parse_outcome(full_score),
+            "result_handicap": _parse_handicap_result(full_score, handicap),
+        }
+        existed = upsert_result(row, base_dir=base_dir, data_source="history_fetch")
+        if existed:
+            updated += 1
+        else:
+            inserted += 1
+
+    return {"inserted": inserted, "updated": updated, "total": len(records)}
 
 
 def load_existing_match(row: dict[str, Any], base_dir: Path | None = None) -> bool:
