@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +45,20 @@ VALID_SCORE_RE = re.compile(r"^\d{1,2}-\d{1,2}$")
 VALID_MATCH = {"主胜", "平", "客胜", "未开奖"}
 VALID_HANDICAP = {"让胜", "让平", "让负", "未开奖"}
 VALID_SOURCE = {"auto_result_fetch", "manual_entry", "history_fetch", "repair_script"}
+UNOPENED_KEYWORDS = (
+    "未开奖",
+    "待开奖",
+    "待开",
+    "开奖中",
+    "未出",
+    "未完",
+    "待定",
+    "进行中",
+    "延期",
+    "推迟",
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -77,7 +91,14 @@ def _read_csv(path: Path, columns: list[str]) -> pd.DataFrame:
 
 
 def _normalize_text(v: Any) -> str:
-    return str(v or "").strip()
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
 
 
 def _is_invalid_date_like_score(score: str) -> bool:
@@ -102,6 +123,21 @@ def _derive_match(score: str) -> str:
     return "客胜"
 
 
+def _raw_text_indicates_unopened(raw_result_text: str) -> bool:
+    text = _normalize_text(raw_result_text)
+    if not text:
+        return False
+    return any(keyword in text for keyword in UNOPENED_KEYWORDS)
+
+
+def _is_unopened_record(score: str, result_match: str, result_handicap: str, raw_result_text: str) -> bool:
+    if result_match == "未开奖" or result_handicap == "未开奖":
+        return True
+    if not score and _raw_text_indicates_unopened(raw_result_text):
+        return True
+    return False
+
+
 def _row_key(row: dict[str, Any]) -> tuple[str, str]:
     raw_id = _normalize_text(row.get("raw_id"))
     match_no = _normalize_text(row.get("match_no"))
@@ -118,7 +154,7 @@ def _row_key(row: dict[str, Any]) -> tuple[str, str]:
     return ("invalid", "")
 
 
-def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool]:
     out = {k: row.get(k) for k in RAW_COLUMNS}
     out["issue_date"] = _normalize_text(out.get("issue_date"))
     out["match_no"] = _normalize_text(out.get("match_no"))
@@ -126,6 +162,7 @@ def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, 
     out["away_team"] = _normalize_text(out.get("away_team"))
     out["raw_id"] = _normalize_text(out.get("raw_id")) or None
     out["full_time_score"] = _normalize_text(out.get("full_time_score"))
+    out["raw_result_text"] = _normalize_text(out.get("raw_result_text"))
 
     src = _normalize_text(out.get("data_source")) or default_source
     out["data_source"] = src if src in VALID_SOURCE else default_source
@@ -134,18 +171,40 @@ def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, 
     key_type, _ = _row_key(out)
     if key_type == "invalid":
         bad = {**out, "bad_reason": "唯一键缺失(raw_id/match_no+issue_date/match_no+teams)"}
-        return None, bad
+        return None, bad, False
 
     score = out["full_time_score"]
+    result_match = _normalize_text(out.get("result_match"))
+    result_handicap = _normalize_text(out.get("result_handicap"))
+    is_unopened = _is_unopened_record(
+        score=score,
+        result_match=result_match,
+        result_handicap=result_handicap,
+        raw_result_text=out["raw_result_text"],
+    )
+
+    if is_unopened:
+        clean = {
+            "issue_date": out["issue_date"],
+            "match_no": out["match_no"],
+            "home_team": out["home_team"],
+            "away_team": out["away_team"],
+            "raw_id": out["raw_id"],
+            "full_time_score": score,
+            "result_match": "未开奖",
+            "result_handicap": "未开奖",
+            "data_source": out["data_source"],
+            "updated_at": out["updated_at"],
+        }
+        return clean, None, True
+
     if not score or _is_invalid_date_like_score(score):
         bad = {**out, "bad_reason": f"full_time_score 非法或疑似日期片段: {score}"}
-        return None, bad
+        return None, bad, False
 
-    result_match = _normalize_text(out.get("result_match"))
     if result_match not in VALID_MATCH:
         result_match = _derive_match(score)
 
-    result_handicap = _normalize_text(out.get("result_handicap"))
     if result_handicap not in VALID_HANDICAP:
         result_handicap = "未开奖"
 
@@ -162,7 +221,7 @@ def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, 
         "updated_at": out["updated_at"],
     }
 
-    return clean, None
+    return clean, None, False
 
 
 def _dedup_clean_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -171,6 +230,7 @@ def _dedup_clean_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     df = pd.DataFrame(rows)
     if "updated_at" not in df.columns:
         df["updated_at"] = _now_iso()
+    df["updated_at"] = df["updated_at"].fillna("").astype(str)
     df["_updated_ts"] = pd.to_datetime(df["updated_at"], errors="coerce")
     df = df.sort_values("_updated_ts", ascending=True)
 
@@ -185,6 +245,20 @@ def _dedup_clean_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(buckets.values())
 
 
+def _count_unopened_rows(raw_df: pd.DataFrame) -> int:
+    if raw_df.empty:
+        return 0
+    count = 0
+    for _, row in raw_df.iterrows():
+        score = _normalize_text(row.get("full_time_score"))
+        result_match = _normalize_text(row.get("result_match"))
+        result_handicap = _normalize_text(row.get("result_handicap"))
+        raw_result_text = _normalize_text(row.get("raw_result_text"))
+        if _is_unopened_record(score, result_match, result_handicap, raw_result_text):
+            count += 1
+    return count
+
+
 def rebuild_clean_results(base_dir: Path | None = None, source_mode: str = "repair_script") -> dict[str, int]:
     paths = result_paths(base_dir)
     raw_df = _read_csv(paths["raw"], RAW_COLUMNS)
@@ -197,13 +271,16 @@ def rebuild_clean_results(base_dir: Path | None = None, source_mode: str = "repa
 
     clean_rows: list[dict[str, Any]] = []
     bad_rows: list[dict[str, Any]] = []
+    unopened_rows = 0
 
     for _, row in raw_df.iterrows():
-        clean, bad = _normalize_row(row.to_dict(), source_mode)
+        clean, bad, is_unopened = _normalize_row(row.to_dict(), source_mode)
         if clean:
             clean_rows.append(clean)
         if bad:
             bad_rows.append(bad)
+        if is_unopened:
+            unopened_rows += 1
 
     dedup_clean = _dedup_clean_rows(clean_rows)
 
@@ -214,10 +291,22 @@ def rebuild_clean_results(base_dir: Path | None = None, source_mode: str = "repa
     bad_df.to_csv(paths["bad"], index=False, encoding="utf-8-sig")
     clean_df.to_csv(paths["legacy"], index=False, encoding="utf-8-sig")
 
+    logger.info(
+        "result_cleaner rebuild finished | raw=%s clean=%s bad=%s unopened=%s | raw_path=%s clean_path=%s bad_path=%s",
+        len(raw_df),
+        len(clean_df),
+        len(bad_df),
+        unopened_rows,
+        paths["raw"],
+        paths["clean"],
+        paths["bad"],
+    )
+
     return {
         "raw_rows": len(raw_df),
         "clean_rows": len(clean_df),
         "bad_rows": len(bad_df),
+        "unopened_rows": unopened_rows,
     }
 
 
@@ -244,4 +333,21 @@ def append_raw_results(records: list[dict[str, Any]], data_source: str, base_dir
 
 def load_clean_results(base_dir: Path | None = None) -> pd.DataFrame:
     paths = result_paths(base_dir)
-    return _read_csv(paths["clean"], RESULT_COLUMNS)
+    clean_df = _read_csv(paths["clean"], RESULT_COLUMNS)
+    if not clean_df.empty:
+        return clean_df
+
+    raw_df = _read_csv(paths["raw"], RAW_COLUMNS)
+    unopened_count = _count_unopened_rows(raw_df)
+    if not raw_df.empty and unopened_count > 0:
+        logger.info(
+            "clean results empty but raw has unopened rows, rebuilding | raw=%s unopened=%s | raw_path=%s clean_path=%s",
+            len(raw_df),
+            unopened_count,
+            paths["raw"],
+            paths["clean"],
+        )
+        rebuild_clean_results(base_dir=base_dir, source_mode="repair_script")
+        clean_df = _read_csv(paths["clean"], RESULT_COLUMNS)
+
+    return clean_df
