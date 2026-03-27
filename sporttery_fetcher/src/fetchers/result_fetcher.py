@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from config.settings import settings
 from src.utils.http import HTTPClient
 from src.utils.logger import get_logger
+from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches
 
 logger = get_logger("result_fetcher")
 
@@ -472,6 +473,25 @@ class ResultFetcher:
         logger.info("接口探测完成 issue_date=%s candidates=%s rows=%s", issue_date, candidates, len(rows))
         return rows, candidates
 
+    def _convert_zqsgkj_row(self, row: dict[str, str]) -> dict[str, str | None]:
+        score = str(row.get("full_score") or "").strip()
+        handicap = str(row.get("handicap") or "").strip() or None
+        return {
+            "issue_date": str(row.get("issue_date") or ""),
+            "match_no": str(row.get("match_no") or ""),
+            "league": str(row.get("league") or ""),
+            "home_team": str(row.get("home_team") or ""),
+            "away_team": str(row.get("away_team") or ""),
+            "handicap": handicap,
+            "kickoff_time": None,
+            "full_time_score": score or None,
+            "result_match": self._parse_outcome(score) if score else "未开奖",
+            "result_handicap": self._parse_handicap_result(score, handicap) if score and handicap else "未开奖",
+            "raw_result_text": json.dumps(row, ensure_ascii=False),
+            "result_generated_at": datetime.now(timezone.utc).isoformat(),
+            "raw_id": None,
+        }
+
     def fetch_results_by_date(self, issue_date: str) -> tuple[list[dict[str, str | None]], int, str]:
         target_date = self._normalize_issue_date(issue_date)
         logger.info("开始抓取赛果 issue_date=%s", target_date)
@@ -479,6 +499,27 @@ class ResultFetcher:
         requested_count = 0
         rows: list[dict[str, str | None]] = []
         mode = "none"
+
+        try:
+            zqsgkj_rows = fetch_zqsgkj_matches(target_date)
+            if zqsgkj_rows:
+                rows = [self._convert_zqsgkj_row(r) for r in zqsgkj_rows]
+                mode = "zqsgkj_playwright"
+                logger.info("赛果抓取方式=%s issue_date=%s parsed=%s", mode, target_date, len(rows))
+                deduped = {
+                    (
+                        str(r.get("issue_date") or ""),
+                        str(r.get("match_no") or ""),
+                        str(r.get("home_team") or ""),
+                        str(r.get("away_team") or ""),
+                    ): r
+                    for r in rows
+                }
+                out = list(deduped.values())
+                logger.info("按日期赛果抓取完成 issue_date=%s mode=%s parsed_rows=%s dedup_rows=%s", target_date, mode, len(rows), len(out))
+                return out, 1, mode
+        except Exception as exc:
+            logger.warning("zqsgkj 按日期抓取失败 issue_date=%s err=%s，回退旧逻辑", target_date, type(exc).__name__)
 
         for url in settings.result_urls:
             requested_count += 1
