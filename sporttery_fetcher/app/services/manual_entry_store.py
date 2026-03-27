@@ -258,7 +258,9 @@ def _standardize_history_record(record: dict[str, Any]) -> tuple[dict[str, Any],
 
 
 def upsert_history_fetch_results(records: list[dict[str, Any]], base_dir: Path | None = None) -> dict[str, int]:
-    logger.info("history_entry raw fetched rows=%s", len(records))
+    issue_date_hint = str(records[0].get("issue_date", "") or "").strip() if records else ""
+    logger.info("history_entry raw fetched rows=%s issue_date=%s", len(records), issue_date_hint)
+    logger.info("history_entry backfill primary key=sales_day_key(issue_date+match_no)")
 
     standardized: list[dict[str, Any]] = []
     auto_result_match_count = 0

@@ -8,6 +8,7 @@ import pandas as pd
 PREDICTION_COLUMNS = [
     "issue_date",
     "match_no",
+    "sales_day_key",
     "league",
     "home_team",
     "away_team",
@@ -40,6 +41,13 @@ LEGACY_COLUMN_MAPPING = {
 }
 
 
+def _sales_day_key(issue_date: object, match_no: object) -> str:
+    issue = str(issue_date or "").strip()
+    no = str(match_no or "").strip()
+    if issue and no:
+        return f"{issue}_{no}"
+    return ""
+
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -61,6 +69,8 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["prediction_remark"] = None
     if "data_source" not in out.columns:
         out["data_source"] = "auto"
+    if "sales_day_key" not in out.columns:
+        out["sales_day_key"] = out.apply(lambda r: _sales_day_key(r.get("issue_date"), r.get("match_no")), axis=1)
 
     for col in PREDICTION_COLUMNS:
         if col not in out.columns:
@@ -68,13 +78,11 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out[PREDICTION_COLUMNS]
 
 
-
 def prediction_file(base_dir: Path | None = None) -> Path:
     root = base_dir or Path(__file__).resolve().parents[2]
     file_path = root / "data" / "predictions" / "gemini_predictions.csv"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     return file_path
-
 
 
 def load_predictions(base_dir: Path | None = None) -> pd.DataFrame:
@@ -88,18 +96,17 @@ def load_predictions(base_dir: Path | None = None) -> pd.DataFrame:
     return _ensure_columns(df)
 
 
-
 def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = {k: row.get(k) for k in PREDICTION_COLUMNS}
     for key in ["issue_date", "match_no", "raw_id", "home_team", "away_team"]:
         value = normalized.get(key)
         normalized[key] = "" if value is None else str(value).strip()
+    normalized["sales_day_key"] = _sales_day_key(normalized.get("issue_date"), normalized.get("match_no"))
     if normalized.get("raw_text") in (None, ""):
         normalized["raw_text"] = normalized.get("gemini_raw_text")
     if not str(normalized.get("data_source") or "").strip():
         normalized["data_source"] = "auto"
     return normalized
-
 
 
 def save_prediction(row: dict[str, Any], base_dir: Path | None = None) -> Path:
@@ -142,15 +149,20 @@ def delete_predictions(matches: list[dict[str, str]], base_dir: Path | None = No
 
     keep_mask = pd.Series([True] * len(df))
     for m in matches:
+        issue_date = str(m.get("issue_date", "") or "").strip()
         raw_id = str(m.get("raw_id", "") or "").strip()
         match_no = str(m.get("match_no", "") or "").strip()
         home = str(m.get("home_team", "") or "").strip()
         away = str(m.get("away_team", "") or "").strip()
         if raw_id:
-            keep_mask &= df["raw_id"].astype(str) != raw_id
+            keep_mask &= ~(
+                (df["issue_date"].astype(str) == issue_date)
+                & (df["raw_id"].astype(str) == raw_id)
+            )
         else:
             keep_mask &= ~(
-                (df["match_no"].astype(str) == match_no)
+                (df["issue_date"].astype(str) == issue_date)
+                & (df["match_no"].astype(str) == match_no)
                 & (df["home_team"].astype(str) == home)
                 & (df["away_team"].astype(str) == away)
             )

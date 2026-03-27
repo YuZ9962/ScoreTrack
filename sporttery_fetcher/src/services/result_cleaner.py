@@ -11,6 +11,7 @@ import pandas as pd
 RESULT_COLUMNS = [
     "issue_date",
     "match_no",
+    "sales_day_key",
     "home_team",
     "away_team",
     "raw_id",
@@ -189,6 +190,14 @@ def _is_unopened_record(score: str, result_match: str, result_handicap: str, raw
     return False
 
 
+def _sales_day_key(issue_date: object, match_no: object) -> str:
+    issue = _normalize_text(issue_date)
+    no = _normalize_text(match_no)
+    if issue and no:
+        return f"{issue}_{no}"
+    return ""
+
+
 def _row_key(row: dict[str, Any]) -> tuple[str, str]:
     raw_id = _normalize_text(row.get("raw_id"))
     match_no = _normalize_text(row.get("match_no"))
@@ -261,6 +270,7 @@ def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, 
         clean = {
             "issue_date": out["issue_date"],
             "match_no": out["match_no"],
+            "sales_day_key": _sales_day_key(out["issue_date"], out["match_no"]),
             "home_team": out["home_team"],
             "away_team": out["away_team"],
             "raw_id": out["raw_id"],
@@ -294,6 +304,7 @@ def _normalize_row(row: dict[str, Any], default_source: str) -> tuple[dict[str, 
     clean = {
         "issue_date": out["issue_date"],
         "match_no": out["match_no"],
+        "sales_day_key": _sales_day_key(out["issue_date"], out["match_no"]),
         "home_team": out["home_team"],
         "away_team": out["away_team"],
         "raw_id": out["raw_id"],
