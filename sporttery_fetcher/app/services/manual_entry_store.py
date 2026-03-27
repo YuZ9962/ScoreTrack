@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from services.prediction_store import save_prediction
+from services.result_cleaner import append_raw_results, load_clean_results
 
 MATCH_COLUMNS = [
     "issue_date",
@@ -163,20 +164,29 @@ def upsert_manual_match(row: dict[str, Any], base_dir: Path | None = None) -> bo
     return existed
 
 
-def upsert_result(row: dict[str, Any], base_dir: Path | None = None, data_source: str = "manual") -> bool:
-    path = _results_file(base_dir)
-    df = _load_csv(path, RESULT_COLUMNS)
+def upsert_result(row: dict[str, Any], base_dir: Path | None = None, data_source: str = "manual_entry") -> bool:
+    clean_df = load_clean_results(base_dir)
+    existed = False
+    if not clean_df.empty:
+        existed = bool(_match_key_mask(clean_df, row).any())
 
-    normalized = {k: row.get(k) for k in RESULT_COLUMNS}
-    normalized["data_source"] = data_source
-    normalized["updated_at"] = _now_iso()
-
-    mask = _match_key_mask(df, normalized)
-    existed = bool(mask.any())
-
-    kept = df[~mask].copy() if not df.empty else df
-    out = pd.concat([kept, pd.DataFrame([normalized])], ignore_index=True)
-    _ensure_columns(out, RESULT_COLUMNS).to_csv(path, index=False, encoding="utf-8-sig")
+    raw_row = {
+        "issue_date": row.get("issue_date"),
+        "match_no": row.get("match_no"),
+        "league": row.get("league"),
+        "home_team": row.get("home_team"),
+        "away_team": row.get("away_team"),
+        "handicap": row.get("handicap"),
+        "kickoff_time": row.get("kickoff_time"),
+        "full_time_score": row.get("full_time_score"),
+        "result_match": row.get("result_match"),
+        "result_handicap": row.get("result_handicap"),
+        "raw_result_text": row.get("raw_result_text"),
+        "result_generated_at": row.get("result_generated_at"),
+        "raw_id": row.get("raw_id"),
+        "updated_at": _now_iso(),
+    }
+    append_raw_results([raw_row], data_source=data_source, base_dir=base_dir)
     return existed
 
 
@@ -233,7 +243,7 @@ def load_existing_prediction(row: dict[str, Any], base_dir: Path | None = None) 
 
 
 def load_existing_result(row: dict[str, Any], base_dir: Path | None = None) -> bool:
-    df = _load_csv(_results_file(base_dir), RESULT_COLUMNS)
+    df = load_clean_results(base_dir)
     if df.empty:
         return False
     return bool(_match_key_mask(df, row).any())
@@ -252,7 +262,7 @@ def save_history_entry(
         prediction_updated = upsert_manual_prediction(prediction_data, base_dir)
         result_updated = False
         if save_result:
-            result_updated = upsert_result(result_data, base_dir)
+            result_updated = upsert_result(result_data, base_dir, data_source="manual_entry")
     except Exception as exc:
         return SaveResult(False, f"保存失败：{type(exc).__name__}", False, False, False)
 

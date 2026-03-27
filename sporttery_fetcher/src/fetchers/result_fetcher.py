@@ -14,6 +14,7 @@ from config.settings import settings
 from src.utils.http import HTTPClient
 from src.utils.logger import get_logger
 from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches
+from app.services.result_cleaner import append_raw_results
 
 logger = get_logger("result_fetcher")
 
@@ -638,6 +639,8 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
         "raw_result_text",
         "result_generated_at",
         "raw_id",
+        "data_source",
+        "updated_at",
     ]
 
     if not rows:
@@ -653,36 +656,27 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
             "matched_predictions": 0,
         }
 
-    new_df = pd.DataFrame(rows)
-    for c in columns:
-        if c not in new_df.columns:
-            new_df[c] = None
-    new_df = new_df[columns]
+    raw_records = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        row = {k: r.get(k) for k in columns}
+        row["data_source"] = "auto_result_fetch"
+        row["updated_at"] = now_iso
+        raw_records.append(row)
 
-    if path.exists():
-        old_df = pd.read_csv(path)
-    else:
-        old_df = pd.DataFrame(columns=columns)
+    clean_stats = append_raw_results(raw_records, data_source="auto_result_fetch", base_dir=root)
 
-    for c in columns:
-        if c not in old_df.columns:
-            old_df[c] = None
-    old_df = old_df[columns]
-
-    merged = pd.concat([old_df, new_df], ignore_index=True)
-    before = len(merged)
-    merged = merged.drop_duplicates(subset=["issue_date", "raw_id", "match_no", "home_team", "away_team"], keep="last")
-    written_rows = len(merged)
-    merged.to_csv(path, index=False, encoding="utf-8-sig")
-
+    # 保持 legacy match_results.csv 兼容统计
+    merged = pd.read_csv(path) if path.exists() else pd.DataFrame()
     matched_predictions = _count_matched_predictions(root, merged)
     logger.info(
-        "赛果写入完成 issue_date=%s mode=%s parsed=%s before=%s written=%s matched_predictions=%s path=%s",
+        "赛果写入完成 issue_date=%s mode=%s parsed=%s raw_appended=%s clean_rows=%s bad_rows=%s matched_predictions=%s path=%s",
         target_date,
         mode,
         len(rows),
-        before,
-        written_rows,
+        clean_stats.get("appended_raw", 0),
+        clean_stats.get("clean_rows", 0),
+        clean_stats.get("bad_rows", 0),
         matched_predictions,
         path,
     )
@@ -694,8 +688,9 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
         "mode": mode,
         "requested_urls": requested_count,
         "parsed_rows": len(rows),
-        "written_rows": written_rows,
+        "written_rows": int(clean_stats.get("clean_rows", 0)),
         "matched_predictions": matched_predictions,
+        "bad_rows": int(clean_stats.get("bad_rows", 0)),
     }
 
 

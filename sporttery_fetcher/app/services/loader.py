@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 from services.chatgpt_store import load_chatgpt_predictions as _load_chatgpt_predictions
 from services.prediction_store import load_predictions as _load_predictions
+from services.result_cleaner import load_clean_results
 
 
 @dataclass
@@ -91,6 +92,10 @@ def results_file(base_dir: Path | None = None) -> Path:
 
 
 def load_results(base_dir: Path | None = None) -> pd.DataFrame:
+    clean_df = load_clean_results(base_dir)
+    if not clean_df.empty:
+        return clean_df
+
     path = results_file(base_dir)
     if not path.exists():
         return pd.DataFrame()

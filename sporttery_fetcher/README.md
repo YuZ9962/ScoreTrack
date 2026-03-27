@@ -579,3 +579,48 @@ WECHAT_ENABLE_DRAFT_UPLOAD=true
 - 来源标记：
   - 手动补录：`data_source=manual`
   - 历史抓取写入：`data_source=history_fetch`
+
+## 17. 赛果存储分层与清洗（新增）
+
+为解决 `match_results.csv` 重复、空字段和异常比分问题，赛果改为三层：
+
+1. 原始赛果表：`data/results/raw_match_results.csv`
+2. 标准化赛果表：`data/results/clean_match_results.csv`
+3. 错误记录表：`data/results/bad_match_results.csv`
+
+### 17.1 标准化字段
+`clean_match_results.csv` 固定字段：
+- `issue_date`
+- `match_no`
+- `home_team`
+- `away_team`
+- `raw_id`
+- `full_time_score`
+- `result_match`
+- `result_handicap`
+- `data_source`
+- `updated_at`
+
+### 17.2 唯一键优先级
+- `raw_id`
+- `match_no + issue_date`
+- `match_no + home_team + away_team`
+
+### 17.3 关键清洗规则
+- `full_time_score` 必须匹配 `^\d{1,2}-\d{1,2}$`
+- 类似 `26-03 / 03-22` 这类疑似日期片段记入 bad，不进入 clean
+- `result_match` 仅允许：`主胜 / 平 / 客胜 / 未开奖`
+- `result_handicap` 仅允许：`让胜 / 让平 / 让负 / 未开奖`
+- `data_source` 仅允许：
+  - `auto_result_fetch`
+  - `manual_entry`
+  - `history_fetch`
+  - `repair_script`
+
+### 17.4 清洗入口
+新增：`app/services/result_cleaner.py`
+- `rebuild_clean_results(base_dir, source_mode)`：将旧 `match_results.csv` 或 raw 数据重建为 clean/bad
+- `append_raw_results(records, data_source, base_dir)`：先写 raw 再自动重建 clean/bad
+
+### 17.5 Analytics 读取
+`app/services/loader.py` 已改为优先读取 `clean_match_results.csv`，若为空再回退旧 `match_results.csv`。
