@@ -149,7 +149,10 @@ def _table_signature(page: Any, table_locator: Any | None = None) -> str:
 
 def _extract_current_page_no(page: Any) -> str:
     selectors = [
-        # pagerN.js 生成的当前页元素
+        # 实际页面结构：li.u-pg3 > span（当前页，无 <a>）
+        "li.u-pg3 span",
+        "li.u-pg3",
+        # pagerN.js 当前页元素（备用）
         ".p-cur",
         "span.p-cur",
         "a.p-cur",
@@ -175,7 +178,10 @@ def _extract_current_page_no(page: Any) -> str:
 
 def _extract_total_pages_hint(page: Any) -> int | None:
     selectors = [
-        # pagerN.js 生成的所有页码 <a>
+        # 实际页面结构：li.u-pg2 a（非当前页链接）、li.u-pg4 a（尾页链接）
+        "li.u-pg2 a",
+        "li.u-pg4 a",
+        # pagerN.js（备用）
         ".p-span a",
         ".p-span",
         # 其他常见分页库
@@ -699,15 +705,45 @@ def _submit_query_with_js_priority(page: Any, start_date: str, end_date: str) ->
 
 
 def _find_next_button(page: Any) -> Any | None:
-    """查找下一页按钮，同时支持 pagerN.show()（生成"下N页"）和 pagerN.pageList()（生成"下一页"）两种模式。"""
-    # 固定文字选择器
+    """查找下一页按钮。
+
+    支持：
+    - 实际页面 li.u-pg2 a（当前页+1 的数字链接）
+    - pagerN "下N页"/"下一页" 文字按钮
+    - 其他常见分页库
+    """
+    # ── 实际页面结构：li.u-pg2 a（非当前页的数字链接） ──
+    # 先确定当前页码，再找当前页+1 的链接
+    cur_page = 1
+    try:
+        cur_el = page.locator("li.u-pg3 span, li.u-pg3").first
+        if cur_el.count() > 0:
+            txt = cur_el.inner_text(timeout=1000).strip()
+            if txt.isdigit():
+                cur_page = int(txt)
+    except Exception:
+        pass
+
+    next_page = cur_page + 1
+    try:
+        candidates = page.locator("li.u-pg2 a")
+        n = candidates.count()
+        for i in range(n):
+            loc = candidates.nth(i)
+            txt = loc.inner_text(timeout=500).strip()
+            if txt.isdigit() and int(txt) == next_page and loc.is_visible():
+                logger.info("找到 li.u-pg2 下一页链接 page=%s", next_page)
+                return loc
+    except Exception:
+        pass
+
+    # ── 固定文字选择器 ──
     fixed_selectors = [
         "a:has-text('下一页')",
         "button:has-text('下一页')",
         "a:has-text('下页')",
         "button:has-text('下页')",
         "a[aria-label*='下一页']",
-        "button[aria-label*='下一页']",
         "a[title*='下一页']",
         ".pagination a:has-text('>')",
         "li.next a",
@@ -725,7 +761,7 @@ def _find_next_button(page: Any) -> Any | None:
         except Exception:
             continue
 
-    # pagerN.show() 模式：生成"下10页"、"下5页"等动态文字
+    # ── pagerN "下N页" 文字模式 ──
     try:
         all_a = page.locator("a")
         count = all_a.count()
@@ -747,40 +783,46 @@ def _find_next_button(page: Any) -> Any | None:
 
 
 def _click_pagern_next_via_js(page: Any) -> tuple[bool, int]:
-    """使用 JavaScript 定位 pagerN 的当前页码，点击下一页数字。
+    """JS 兜底翻页：适配实际页面的 jcSgkj.getDataClickPage() 和 li.u-pg3/u-pg2 结构。
 
-    pagerN 在页数较少时只渲染数字页码（没有"下N页"按钮），需要直接点击数字。
+    当 _find_next_button() 返回 None 时调用（应对 DOM 不可见但 JS 可调用的情况）。
     返回 (success, next_page_no)。
     """
     try:
         result = page.evaluate(
             r"""
             () => {
-                // pagerN 当前页：class="p-cur" 的元素
-                const curEl = document.querySelector('.p-cur');
-                if (!curEl) return {ok: false, cur: 0, next: 0, reason: "no .p-cur"};
+                // 当前页：li.u-pg3 > span（实际页面结构）
+                const curEl = document.querySelector('li.u-pg3 span') ||
+                              document.querySelector('li.u-pg3');
+                if (!curEl) return {ok: false, cur: 0, next: 0, reason: "no u-pg3"};
                 const curNum = parseInt(curEl.textContent.trim(), 10);
-                if (isNaN(curNum)) return {ok: false, cur: 0, next: 0, reason: "p-cur not numeric"};
-
+                if (isNaN(curNum)) return {ok: false, cur: 0, next: 0, reason: "u-pg3 not numeric"};
                 const nextNum = curNum + 1;
-                // 在所有 .p-span 内查找文字为 nextNum 的可点击 <a>
-                const spans = document.querySelectorAll('.p-span');
-                for (const span of spans) {
-                    const a = span.querySelector('a');
-                    if (!a) continue;
+
+                // 方法1：调用页面 JS API jcSgkj.getDataClickPage(N)
+                if (typeof jcSgkj !== "undefined" &&
+                    typeof jcSgkj.getDataClickPage === "function") {
+                    jcSgkj.getDataClickPage(nextNum);
+                    return {ok: true, cur: curNum, next: nextNum, method: "jcSgkj"};
+                }
+
+                // 方法2：点击 li.u-pg2 a 中数字为 nextNum 的链接
+                for (const a of document.querySelectorAll('li.u-pg2 a')) {
                     if (parseInt(a.textContent.trim(), 10) === nextNum) {
                         a.click();
-                        return {ok: true, cur: curNum, next: nextNum, reason: "clicked"};
+                        return {ok: true, cur: curNum, next: nextNum, method: "click"};
                     }
                 }
-                return {ok: false, cur: curNum, next: nextNum, reason: "no next page link"};
+
+                return {ok: false, cur: curNum, next: nextNum, reason: "no link or jcSgkj"};
             }
             """
         )
-        logger.info("pagerN JS翻页结果=%s", result)
+        logger.info("JS兜底翻页结果=%s", result)
         return bool(result.get("ok")), int(result.get("next", 0))
     except Exception:
-        logger.exception("pagerN JS翻页异常")
+        logger.exception("JS兜底翻页异常")
         return False, 0
 
 
