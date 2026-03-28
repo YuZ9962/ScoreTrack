@@ -149,6 +149,11 @@ def _table_signature(page: Any, table_locator: Any | None = None) -> str:
 
 def _extract_current_page_no(page: Any) -> str:
     selectors = [
+        # pagerN.js 生成的当前页元素
+        ".p-cur",
+        "span.p-cur",
+        "a.p-cur",
+        # 其他常见分页库
         ".pagination .active",
         ".page .active",
         ".pager .active",
@@ -161,7 +166,7 @@ def _extract_current_page_no(page: Any) -> str:
             node = page.locator(selector).first
             if node.count() > 0:
                 text = node.inner_text(timeout=1000).strip()
-                if text:
+                if text and text.isdigit():
                     return text
         except Exception:
             continue
@@ -170,6 +175,10 @@ def _extract_current_page_no(page: Any) -> str:
 
 def _extract_total_pages_hint(page: Any) -> int | None:
     selectors = [
+        # pagerN.js 生成的所有页码 <a>
+        ".p-span a",
+        ".p-span",
+        # 其他常见分页库
         ".pagination a",
         ".page a",
         ".pager a",
@@ -737,11 +746,68 @@ def _find_next_button(page: Any) -> Any | None:
     return None
 
 
+def _click_pagern_next_via_js(page: Any) -> tuple[bool, int]:
+    """使用 JavaScript 定位 pagerN 的当前页码，点击下一页数字。
+
+    pagerN 在页数较少时只渲染数字页码（没有"下N页"按钮），需要直接点击数字。
+    返回 (success, next_page_no)。
+    """
+    try:
+        result = page.evaluate(
+            r"""
+            () => {
+                // pagerN 当前页：class="p-cur" 的元素
+                const curEl = document.querySelector('.p-cur');
+                if (!curEl) return {ok: false, cur: 0, next: 0, reason: "no .p-cur"};
+                const curNum = parseInt(curEl.textContent.trim(), 10);
+                if (isNaN(curNum)) return {ok: false, cur: 0, next: 0, reason: "p-cur not numeric"};
+
+                const nextNum = curNum + 1;
+                // 在所有 .p-span 内查找文字为 nextNum 的可点击 <a>
+                const spans = document.querySelectorAll('.p-span');
+                for (const span of spans) {
+                    const a = span.querySelector('a');
+                    if (!a) continue;
+                    if (parseInt(a.textContent.trim(), 10) === nextNum) {
+                        a.click();
+                        return {ok: true, cur: curNum, next: nextNum, reason: "clicked"};
+                    }
+                }
+                return {ok: false, cur: curNum, next: nextNum, reason: "no next page link"};
+            }
+            """
+        )
+        logger.info("pagerN JS翻页结果=%s", result)
+        return bool(result.get("ok")), int(result.get("next", 0))
+    except Exception:
+        logger.exception("pagerN JS翻页异常")
+        return False, 0
+
+
 def _click_next_page(page: Any, previous_signature: str, before_first_match_no: str) -> tuple[bool, str, str]:
     next_btn = _find_next_button(page)
     if next_btn is None:
-        logger.info("分页识别：未找到下一页控件")
-        return False, "", ""
+        # 兜底：尝试 pagerN 数字页码模式
+        js_ok, next_page_no = _click_pagern_next_via_js(page)
+        if not js_ok:
+            logger.info("分页识别：未找到下一页控件（含pagerN数字兜底）")
+            return False, "", ""
+        logger.info("pagerN 数字翻页触发成功，目标页=%s", next_page_no)
+        # 等待页面内容更新
+        changed = False
+        after_signature = ""
+        for _ in range(12):
+            page.wait_for_timeout(600)
+            after_signature = _table_signature(page)
+            if after_signature and after_signature != previous_signature:
+                changed = True
+                break
+        page_rows_after, _ = _parse_current_page_rows(page, issue_date="")
+        after_first_match_no = _first_match_no(page_rows_after)
+        if not changed and after_first_match_no == before_first_match_no:
+            logger.warning("pagerN 数字翻页后内容未变化，停止翻页")
+            return False, after_first_match_no, after_signature
+        return True, after_first_match_no, after_signature
 
     logger.info("分页识别：找到下一页控件，准备点击")
     try:
