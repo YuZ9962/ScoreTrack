@@ -888,14 +888,18 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
             new_state.get("html_excerpt"),
         )
 
-        # 若表单填写失败（js_set_ok=False）或者加载了错误日期，尝试 URL 参数兜底
+        # 仅在表单填写本身失败时才触发URL兜底；
+        # 若 loaded_first_date 在查询窗口 [start_date, end_date] 内，说明查询已生效，无需兜底。
         loaded_first_date = new_state.get("first_date", "")
-        date_mismatch = loaded_first_date and loaded_first_date != start_date
-        if not js_set_ok or date_mismatch:
+        in_window = bool(loaded_first_date) and start_date <= loaded_first_date <= end_date
+        if in_window:
+            logger.info(
+                "查询成功：loaded_first_date=%s 在查询窗口 [%s, %s] 内，跳过URL兜底",
+                loaded_first_date, start_date, end_date,
+            )
+        elif not js_set_ok:
             logger.warning(
-                "表单日期设置失败或返回数据日期不符（loaded=%s expect=%s），尝试URL参数兜底导航",
-                loaded_first_date,
-                start_date,
+                "表单日期填写失败（js_set_ok=False），尝试URL参数兜底导航",
             )
             url_ok = _try_url_param_navigation(page, start_date, end_date)
             if url_ok:
@@ -904,6 +908,11 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
                 logger.info("URL参数兜底成功 new_first_date=%s", new_state.get("first_date"))
             else:
                 logger.warning("URL参数兜底也未能定位到目标日期，继续使用当前页面数据（将依赖 match_date 字段过滤）")
+        else:
+            logger.warning(
+                "表单提交后首条日期 loaded=%s 不在查询窗口内（期望范围 [%s, %s]），可能无当日赛事",
+                loaded_first_date, start_date, end_date,
+            )
 
         if not changed:
             logger.warning("日期查询未生效：#matchList在两次提交后仍未变化，停止后续过滤链路")
