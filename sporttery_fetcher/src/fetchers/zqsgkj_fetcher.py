@@ -459,67 +459,240 @@ def _wait_matchlist_updated(page: Any, old_state: dict[str, Any], timeout_ms: in
     return False, _extract_matchlist_state(page)
 
 
+def _wait_for_form_ready(page: Any, timeout_ms: int = 15000) -> bool:
+    """等待SPA动态注入的表单就绪（#sgkj_991 内出现 input 元素）。"""
+    # 先等待 #sgkj_991 容器本身
+    try:
+        page.wait_for_selector("#sgkj_991", timeout=timeout_ms)
+    except Exception:
+        logger.warning("等待 #sgkj_991 超时，可能是SPA加载失败")
+
+    # 再等待容器内的 input 元素
+    for selector in ["#sgkj_991 input", "#sgkj_991 form", "input[id*='date']", "input[type='text']"]:
+        try:
+            page.wait_for_selector(selector, timeout=6000)
+            logger.info("表单就绪：检测到 selector=%s", selector)
+            return True
+        except Exception:
+            continue
+
+    logger.warning("表单等待超时：未找到任何 input 元素，后续可能无法填写日期")
+    return False
+
+
+def _diagnose_date_inputs(page: Any) -> list[dict[str, Any]]:
+    """扫描页面上所有可能的日期输入控件，用于调试 js_set_ok=False 场景。"""
+    try:
+        return page.evaluate(
+            r"""
+            () => {
+                const inputs = Array.from(document.querySelectorAll("input"));
+                return inputs.map(el => ({
+                    id: el.id || "",
+                    name: el.name || "",
+                    type: el.type || "",
+                    placeholder: el.placeholder || "",
+                    value: el.value || "",
+                    className: el.className || "",
+                })).filter(i =>
+                    i.type === "text" || i.type === "date" ||
+                    /date|start|end|begin/i.test(i.id + i.name + i.placeholder)
+                ).slice(0, 10);
+            }
+            """
+        )
+    except Exception:
+        return []
+
+
+def _fill_date_input(page: Any, selectors: list[str], value: str) -> bool:
+    """尝试多种方式填写日期输入框，返回是否成功。
+
+    优先使用 jQuery UI Datepicker API（网站实际使用的控件），
+    再回退到 Playwright fill() 和 JS 直接赋值。
+    """
+    for sel in selectors:
+        # 1) jQuery UI Datepicker API — 网站使用 jquery-ui-timepicker-addon.js
+        try:
+            ok = page.evaluate(
+                """
+                ([sel, val]) => {
+                    if (typeof $ === "undefined" || typeof $.fn.datepicker === "undefined") return false;
+                    const el = $(sel);
+                    if (!el.length) return false;
+                    try {
+                        el.datepicker("setDate", val);
+                        el.trigger("input").trigger("change").trigger("blur");
+                        return el.val() !== "";
+                    } catch(e) {
+                        el.val(val).trigger("input").trigger("change").trigger("blur");
+                        return el.val() !== "";
+                    }
+                }
+                """,
+                [sel, value],
+            )
+            if ok:
+                logger.info("jQuery datepicker setDate 成功 sel=%s val=%s", sel, value)
+                return True
+        except Exception:
+            pass
+
+        # 2) Playwright fill()
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                loc.triple_click(timeout=2000)
+                loc.fill(value, timeout=2000)
+                loc.dispatch_event("input")
+                loc.dispatch_event("change")
+                actual = loc.input_value(timeout=1000)
+                if value in actual or actual in value:
+                    return True
+        except Exception:
+            pass
+
+        # 3) JS 直接赋值 + 事件（兜底）
+        try:
+            ok = page.evaluate(
+                """
+                ([sel, val]) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    const nativeInputSetter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, "value"
+                    )?.set;
+                    if (nativeInputSetter) nativeInputSetter.call(el, val);
+                    else el.value = val;
+                    el.dispatchEvent(new Event("input",  { bubbles: true }));
+                    el.dispatchEvent(new Event("change", { bubbles: true }));
+                    el.dispatchEvent(new Event("blur",   { bubbles: true }));
+                    return el.value !== "";
+                }
+                """,
+                [sel, value],
+            )
+            if ok:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 def _submit_query_with_js_priority(page: Any, start_date: str, end_date: str) -> tuple[bool, bool, str]:
     js_set_ok = False
     click_submit_ok = False
     submit_mode = "none"
 
-    try:
-        set_ret = page.evaluate(
-            """
-            ([startDate, endDate]) => {
-                const s = document.querySelector("#start_date");
-                const e = document.querySelector("#end_date");
-                if (!s || !e) return false;
-                s.value = startDate;
-                e.value = endDate;
-                s.dispatchEvent(new Event("input", { bubbles: true }));
-                s.dispatchEvent(new Event("change", { bubbles: true }));
-                e.dispatchEvent(new Event("input", { bubbles: true }));
-                e.dispatchEvent(new Event("change", { bubbles: true }));
-                return true;
-            }
-            """,
-            [start_date, end_date],
-        )
-        js_set_ok = bool(set_ret)
-    except Exception:
-        logger.exception("JS设定查询日期失败")
+    # 先诊断页面上有哪些日期输入框（SPA内容加载后）
+    date_inputs = _diagnose_date_inputs(page)
+    logger.info("页面日期输入框诊断结果=%s", date_inputs)
 
-    try:
-        click_ret = page.evaluate(
-            """
-            () => {
-                if (typeof click_submit === "function") {
-                    click_submit();
-                    return "click_submit";
-                }
-                return "no_click_submit";
-            }
-            """
-        )
-        if click_ret == "click_submit":
-            click_submit_ok = True
-            submit_mode = "click_submit"
-    except Exception:
-        logger.exception("调用click_submit()失败")
+    # 构建候选选择器：先放从诊断结果中动态发现的 ID，再放静态备选
+    start_selectors: list[str] = []
+    end_selectors: list[str] = []
+
+    # 根据诊断结果推断：诊断列表第1个为 start，第2个为 end（常见布局）
+    for i, info in enumerate(date_inputs[:4]):
+        el_id = info.get("id", "")
+        el_name = info.get("name", "")
+        if el_id:
+            sel = f"#{el_id}"
+            if i == 0:
+                start_selectors.insert(0, sel)
+            elif i == 1:
+                end_selectors.insert(0, sel)
+            else:
+                start_selectors.append(sel)
+                end_selectors.append(sel)
+        if el_name:
+            sel = f"[name='{el_name}']"
+            if i == 0:
+                start_selectors.append(sel)
+            elif i == 1:
+                end_selectors.append(sel)
+
+    # 静态备选选择器
+    start_selectors += [
+        "#start_date", "#startDate", "#queryStartDate", "#beginDate",
+        "#sgkj_991 input[id*='start']", "#sgkj_991 input[name*='start']",
+        "input[id*='start']", "input[name*='start']", "input[name*='begin']",
+        "input[placeholder*='开始']", "input[placeholder*='起始']",
+    ]
+    end_selectors += [
+        "#end_date", "#endDate", "#queryEndDate",
+        "#sgkj_991 input[id*='end']", "#sgkj_991 input[name*='end']",
+        "input[id*='end']", "input[name*='end']",
+        "input[placeholder*='结束']", "input[placeholder*='截止']",
+    ]
+
+    start_ok = _fill_date_input(page, start_selectors, start_date)
+    end_ok = _fill_date_input(page, end_selectors, end_date)
+    js_set_ok = start_ok and end_ok
+    if not start_ok:
+        logger.warning("开始日期填写失败，将使用 URL 参数兜底")
+    if not end_ok:
+        logger.warning("结束日期填写失败，将使用 URL 参数兜底")
+
+    page.wait_for_timeout(300)
+
+    # 尝试方法1: 调用页面全局 click_submit() / query() / search()
+    for fn_name in ("click_submit", "query", "search", "doQuery", "doSearch"):
+        try:
+            click_ret = page.evaluate(
+                f"""
+                () => {{
+                    if (typeof {fn_name} === "function") {{
+                        {fn_name}();
+                        return "{fn_name}";
+                    }}
+                    return "";
+                }}
+                """
+            )
+            if click_ret:
+                click_submit_ok = True
+                submit_mode = f"js_{fn_name}"
+                logger.info("通过全局函数提交查询 fn=%s", fn_name)
+                break
+        except Exception:
+            pass
+
+    # 方法2: 点击查询按钮
+    if not click_submit_ok:
+        submit_btn_selectors = [
+            "#sgkj_991 input[type='button']",
+            "#sgkj_991 button",
+            "input[type='button'][value*='查询']",
+            "button:has-text('查询')",
+            "input[value*='查询']",
+            "a:has-text('查询')",
+            "input[type='submit']",
+        ]
+        for btn_sel in submit_btn_selectors:
+            try:
+                btn = page.locator(btn_sel).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(timeout=5000)
+                    click_submit_ok = True
+                    submit_mode = f"btn:{btn_sel}"
+                    logger.info("通过按钮提交查询 selector=%s", btn_sel)
+                    break
+            except Exception:
+                continue
 
     if not click_submit_ok:
-        try:
-            page.get_by_text("开始查询").first.click(timeout=5000)
-            submit_mode = "button_click"
-        except Exception:
-            try:
-                page.locator("input[type='button'][value*='查询'],button:has-text('查询')").first.click(timeout=5000)
-                submit_mode = "button_click"
-            except Exception:
-                submit_mode = "submit_failed"
+        submit_mode = "submit_failed"
+        logger.warning("所有提交方式均失败")
 
     return js_set_ok, click_submit_ok, submit_mode
 
 
 def _find_next_button(page: Any) -> Any | None:
-    next_selectors = [
+    """查找下一页按钮，同时支持 pagerN.show()（生成"下N页"）和 pagerN.pageList()（生成"下一页"）两种模式。"""
+    # 固定文字选择器
+    fixed_selectors = [
         "a:has-text('下一页')",
         "button:has-text('下一页')",
         "a:has-text('下页')",
@@ -527,13 +700,11 @@ def _find_next_button(page: Any) -> Any | None:
         "a[aria-label*='下一页']",
         "button[aria-label*='下一页']",
         "a[title*='下一页']",
-        "button[title*='下一页']",
         ".pagination a:has-text('>')",
-        ".page a:has-text('>')",
         "li.next a",
         "a[rel='next']",
     ]
-    for selector in next_selectors:
+    for selector in fixed_selectors:
         try:
             loc = page.locator(selector).first
             if loc.count() > 0 and loc.is_visible():
@@ -544,6 +715,25 @@ def _find_next_button(page: Any) -> Any | None:
                 return loc
         except Exception:
             continue
+
+    # pagerN.show() 模式：生成"下10页"、"下5页"等动态文字
+    try:
+        all_a = page.locator("a")
+        count = all_a.count()
+        for i in range(count):
+            try:
+                loc = all_a.nth(i)
+                txt = loc.inner_text(timeout=300).strip()
+                if re.match(r"^下\d+页$", txt) and loc.is_visible():
+                    class_name = (loc.get_attribute("class") or "").lower()
+                    if "disabled" not in class_name:
+                        logger.info("pagerN 分页按钮识别到 text=%s", txt)
+                        return loc
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     return None
 
 
@@ -606,6 +796,29 @@ def _dedup_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
     return list(buckets.values())
 
 
+def _try_url_param_navigation(page: Any, start_date: str, end_date: str) -> bool:
+    """尝试通过 URL 查询参数直接导航到目标日期范围，作为表单填写失败时的兜底方案。"""
+    param_variants = [
+        f"{ZQSGKJ_URL}?startDate={start_date}&endDate={end_date}",
+        f"{ZQSGKJ_URL}?start_date={start_date}&end_date={end_date}",
+        f"{ZQSGKJ_URL}?beginDate={start_date}&endDate={end_date}",
+        f"{ZQSGKJ_URL}?queryStartDate={start_date}&queryEndDate={end_date}",
+    ]
+    for url in param_variants:
+        try:
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2000)
+            state = _extract_matchlist_state(page)
+            first_date = state.get("first_date", "")
+            if first_date and first_date == start_date:
+                logger.info("URL参数导航成功 url=%s first_date=%s", url, first_date)
+                return True
+            logger.info("URL参数导航后首条日期=%s（期望=%s），继续尝试下一个", first_date, start_date)
+        except Exception:
+            logger.exception("URL参数导航失败 url=%s", url)
+    return False
+
+
 def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
     from playwright.sync_api import sync_playwright
 
@@ -625,6 +838,11 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
         page = context.new_page()
 
         page.goto(ZQSGKJ_URL, wait_until="domcontentloaded", timeout=settings.request_timeout * 1000)
+
+        # 等待SPA通过 commonV1Fun.loadHtml() 将表单注入 #sgkj_991
+        form_ready = _wait_for_form_ready(page, timeout_ms=18000)
+        logger.info("SPA表单就绪状态=%s", form_ready)
+
         old_state = _extract_matchlist_state(page)
         logger.info(
             "查询前状态 first_date=%s first_match_no=%s match_count=%s html_excerpt=%s",
@@ -669,6 +887,23 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
             new_state.get("update_time"),
             new_state.get("html_excerpt"),
         )
+
+        # 若表单填写失败（js_set_ok=False）或者加载了错误日期，尝试 URL 参数兜底
+        loaded_first_date = new_state.get("first_date", "")
+        date_mismatch = loaded_first_date and loaded_first_date != start_date
+        if not js_set_ok or date_mismatch:
+            logger.warning(
+                "表单日期设置失败或返回数据日期不符（loaded=%s expect=%s），尝试URL参数兜底导航",
+                loaded_first_date,
+                start_date,
+            )
+            url_ok = _try_url_param_navigation(page, start_date, end_date)
+            if url_ok:
+                changed = True
+                new_state = _extract_matchlist_state(page)
+                logger.info("URL参数兜底成功 new_first_date=%s", new_state.get("first_date"))
+            else:
+                logger.warning("URL参数兜底也未能定位到目标日期，继续使用当前页面数据（将依赖 match_date 字段过滤）")
 
         if not changed:
             logger.warning("日期查询未生效：#matchList在两次提交后仍未变化，停止后续过滤链路")
@@ -758,10 +993,30 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
     deduped = _dedup_records(all_rows)
     logger.info("去重后比赛数=%s", len(deduped))
 
+    # 主过滤：match_no 的 weekday 前缀精确匹配
     filtered = [r for r in deduped if str(r.get("match_no", "")).startswith(target_prefix)]
     logger.info("weekday 前缀过滤后的比赛数=%s", len(filtered))
 
-    logger.info("去重后最终比赛数=%s", len(filtered))
+    # 降级过滤：若 weekday 前缀匹配失败，改用 match_date 字段精确匹配 issue_date
+    # 场景：表单日期填写失败但 URL 兜底也未成功，或者同批次数据里混有目标日期记录
+    if not filtered:
+        date_filtered = [r for r in deduped if str(r.get("match_date", "")).strip() == issue_date]
+        if date_filtered:
+            logger.info(
+                "weekday前缀匹配0条，降级使用 match_date=%s 精确过滤，命中 %s 条",
+                issue_date,
+                len(date_filtered),
+            )
+            filtered = date_filtered
+        else:
+            logger.warning(
+                "weekday前缀与match_date两级过滤均为0，可能原因：(1)表单日期设置失败且URL兜底无效 "
+                "(2) %s 确实无竞彩足球赛事。prefix_set=%s",
+                issue_date,
+                prefix_set,
+            )
+
+    logger.info("最终返回比赛数=%s", len(filtered))
     return filtered
 
 
