@@ -38,13 +38,11 @@ if "history_fetch_issue_date" not in st.session_state:
     st.session_state["history_fetch_issue_date"] = _today()
 
 st.subheader("A. 按 issue_date 抓取历史赛果（官方 zqsgkj）")
-fetch_col1, fetch_col2 = st.columns([2, 1])
-with fetch_col1:
+st.caption("仅用于历史补录：按竞彩编号日 issue_date 抓取并预览，再手动确认写入。")
+
+with st.form("history_fetch_form", clear_on_submit=False):
     fetch_issue_date = st.date_input("抓取 issue_date", value=datetime.now().date(), key="history_fetch_date").isoformat()
-with fetch_col2:
-    st.write("")
-    st.write("")
-    fetch_clicked = st.button("抓取历史赛果", type="primary")
+    fetch_clicked = st.form_submit_button("抓取历史赛果", type="primary")
 
 if fetch_clicked:
     with st.spinner(f"正在抓取 {fetch_issue_date} 的历史赛果..."):
@@ -53,19 +51,20 @@ if fetch_clicked:
             st.session_state["history_fetch_preview"] = records
             st.session_state["history_fetch_issue_date"] = fetch_issue_date
             if records:
-                st.success(f"抓取成功：共 {len(records)} 场")
+                st.success(f"抓取成功：issue_date={fetch_issue_date}，共 {len(records)} 场")
             else:
-                st.warning("未抓取到赛果，请检查日期范围或网络环境")
+                st.warning("抓取完成但无可用赛果，请检查 issue_date 或网络环境")
         except Exception as exc:
             st.session_state["history_fetch_preview"] = []
             st.error(f"抓取失败：{type(exc).__name__}")
 
 preview = st.session_state.get("history_fetch_preview", [])
 if preview:
-    st.markdown("**抓取结果预览（可确认写入）**")
+    st.markdown("**抓取结果预览（确认后才写入）**")
     preview_df = pd.DataFrame(preview)
     st.dataframe(preview_df, use_container_width=True, hide_index=True)
-    if st.button("确认写入赛果文件 data/results/match_results.csv"):
+
+    if st.button("写入历史结果文件", key="write_history_results"):
         stats = upsert_history_fetch_results(preview, ROOT)
         st.success(
             f"写入完成：总计 {stats['total']} 场，新增 {stats['inserted']} 场，覆盖更新 {stats['updated']} 场（data_source=history_fetch）"

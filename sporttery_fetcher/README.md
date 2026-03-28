@@ -624,3 +624,21 @@ WECHAT_ENABLE_DRAFT_UPLOAD=true
 
 ### 17.5 Analytics 读取
 `app/services/loader.py` 已改为优先读取 `clean_match_results.csv`，若为空再回退旧 `match_results.csv`。
+
+## 页面职责边界（重要）
+
+### Analytics 页面（`app/pages/analytics.py`）
+- 仅用于**日常更新比赛结果**（当前分析所需数据）。
+- 点击“更新比赛结果”后，会触发官方赛果更新主链路并刷新命中统计展示。
+- 不承担历史 issue_date 的深度补录抓取流程。
+
+### History Entry 页面（`app/pages/history_entry.py`）
+- 仅用于**历史补录**：
+  - 手动补录比赛/预测/赛果；
+  - 按 issue_date 抓取历史赛果；
+  - 先预览后确认写入。
+- 历史赛果抓取使用 `src/fetchers/zqsgkj_fetcher.py`，按竞彩编号日语义过滤（`match_no` weekday 前缀）。
+
+### zqsgkj 表格识别策略
+- 采用“两段式解析”：先识别表头表，再识别数据表。
+- 识别失败时回退到单表模式，并保留调试日志与快照，便于定位页面结构变动。

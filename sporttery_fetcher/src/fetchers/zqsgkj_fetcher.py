@@ -381,6 +381,143 @@ def _first_match_no(rows: list[dict[str, str]]) -> str:
     return str(rows[0].get("match_no", "") or "").strip()
 
 
+def _extract_matchlist_state(page: Any) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "first_date": "",
+        "first_match_no": "",
+        "match_count": 0,
+        "html_digest": "",
+        "html_excerpt": "",
+        "update_time": "",
+    }
+    try:
+        state = page.evaluate(
+            r"""
+            () => {
+                const out = {
+                    first_date: "",
+                    first_match_no: "",
+                    match_count: 0,
+                    html_digest: "",
+                    html_excerpt: "",
+                    update_time: "",
+                };
+                const wrap = document.querySelector("#matchList");
+                if (!wrap) return out;
+
+                const html = wrap.innerHTML || "";
+                out.match_count = wrap.querySelectorAll("tr").length;
+                out.html_excerpt = html.replace(/\s+/g, " ").slice(0, 160);
+                let hash = 0;
+                for (let i = 0; i < html.length; i++) {
+                    hash = ((hash << 5) - hash) + html.charCodeAt(i);
+                    hash |= 0;
+                }
+                out.html_digest = String(hash);
+
+                const rows = wrap.querySelectorAll("tr");
+                for (const tr of rows) {
+                    const cells = tr.querySelectorAll("td,th");
+                    if (cells.length >= 2) {
+                        const c1 = (cells[0].textContent || "").trim();
+                        const c2 = (cells[1].textContent || "").trim();
+                        if (/^\d{4}-\d{2}-\d{2}$/.test(c1) && /^周[一二三四五六日]\d{3}$/.test(c2)) {
+                            out.first_date = c1;
+                            out.first_match_no = c2;
+                            break;
+                        }
+                    }
+                }
+
+                const wholeText = document.body?.innerText || "";
+                const m = wholeText.match(/更新时间[:：]?\s*([0-9:\-\s]{5,})/);
+                if (m && m[0]) out.update_time = m[0].trim();
+                return out;
+            }
+            """
+        )
+    except Exception:
+        logger.exception("提取#matchList状态失败")
+    return state
+
+
+def _wait_matchlist_updated(page: Any, old_state: dict[str, Any], timeout_ms: int = 14000) -> tuple[bool, dict[str, Any]]:
+    waited = 0
+    interval = 500
+    while waited < timeout_ms:
+        page.wait_for_timeout(interval)
+        waited += interval
+        new_state = _extract_matchlist_state(page)
+        changed = (
+            new_state.get("html_digest") != old_state.get("html_digest")
+            or new_state.get("first_date") != old_state.get("first_date")
+            or new_state.get("first_match_no") != old_state.get("first_match_no")
+            or int(new_state.get("match_count", 0) or 0) != int(old_state.get("match_count", 0) or 0)
+        )
+        if changed:
+            return True, new_state
+    return False, _extract_matchlist_state(page)
+
+
+def _submit_query_with_js_priority(page: Any, start_date: str, end_date: str) -> tuple[bool, bool, str]:
+    js_set_ok = False
+    click_submit_ok = False
+    submit_mode = "none"
+
+    try:
+        set_ret = page.evaluate(
+            """
+            ([startDate, endDate]) => {
+                const s = document.querySelector("#start_date");
+                const e = document.querySelector("#end_date");
+                if (!s || !e) return false;
+                s.value = startDate;
+                e.value = endDate;
+                s.dispatchEvent(new Event("input", { bubbles: true }));
+                s.dispatchEvent(new Event("change", { bubbles: true }));
+                e.dispatchEvent(new Event("input", { bubbles: true }));
+                e.dispatchEvent(new Event("change", { bubbles: true }));
+                return true;
+            }
+            """,
+            [start_date, end_date],
+        )
+        js_set_ok = bool(set_ret)
+    except Exception:
+        logger.exception("JS设定查询日期失败")
+
+    try:
+        click_ret = page.evaluate(
+            """
+            () => {
+                if (typeof click_submit === "function") {
+                    click_submit();
+                    return "click_submit";
+                }
+                return "no_click_submit";
+            }
+            """
+        )
+        if click_ret == "click_submit":
+            click_submit_ok = True
+            submit_mode = "click_submit"
+    except Exception:
+        logger.exception("调用click_submit()失败")
+
+    if not click_submit_ok:
+        try:
+            page.get_by_text("开始查询").first.click(timeout=5000)
+            submit_mode = "button_click"
+        except Exception:
+            try:
+                page.locator("input[type='button'][value*='查询'],button:has-text('查询')").first.click(timeout=5000)
+                submit_mode = "button_click"
+            except Exception:
+                submit_mode = "submit_failed"
+
+    return js_set_ok, click_submit_ok, submit_mode
+
+
 def _find_next_button(page: Any) -> Any | None:
     next_selectors = [
         "a:has-text('下一页')",
@@ -488,10 +625,56 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
         page = context.new_page()
 
         page.goto(ZQSGKJ_URL, wait_until="domcontentloaded", timeout=settings.request_timeout * 1000)
-        page.locator("#start_date").fill(start_date)
-        page.locator("#end_date").fill(end_date)
-        page.get_by_text("开始查询").first.click()
-        page.wait_for_timeout(2200)
+        old_state = _extract_matchlist_state(page)
+        logger.info(
+            "查询前状态 first_date=%s first_match_no=%s match_count=%s html_excerpt=%s",
+            old_state.get("first_date"),
+            old_state.get("first_match_no"),
+            old_state.get("match_count"),
+            old_state.get("html_excerpt"),
+        )
+
+        js_set_ok, click_submit_ok, submit_mode = _submit_query_with_js_priority(page, start_date, end_date)
+        page.wait_for_timeout(1200)
+        changed, new_state = _wait_matchlist_updated(page, old_state, timeout_ms=15000)
+
+        if not changed:
+            logger.warning("首次提交后结果未变化，触发二次click_submit重试")
+            try:
+                page.evaluate(
+                    """
+                    () => {
+                        if (typeof click_submit === "function") {
+                            click_submit();
+                            return true;
+                        }
+                        return false;
+                    }
+                    """
+                )
+            except Exception:
+                logger.exception("二次调用click_submit失败")
+            page.wait_for_timeout(1000)
+            changed, new_state = _wait_matchlist_updated(page, old_state, timeout_ms=10000)
+
+        logger.info(
+            "查询后状态 js_set_ok=%s click_submit_ok=%s submit_mode=%s changed=%s new_first_date=%s new_first_match_no=%s new_match_count=%s update_time=%s html_excerpt=%s",
+            js_set_ok,
+            click_submit_ok,
+            submit_mode,
+            changed,
+            new_state.get("first_date"),
+            new_state.get("first_match_no"),
+            new_state.get("match_count"),
+            new_state.get("update_time"),
+            new_state.get("html_excerpt"),
+        )
+
+        if not changed:
+            logger.warning("日期查询未生效：#matchList在两次提交后仍未变化，停止后续过滤链路")
+            browser.close()
+            return []
+
         page.wait_for_load_state("networkidle", timeout=max(12000, settings.request_timeout * 1000))
 
         _save_page_snapshot(page, issue_date, page_no=1)
@@ -556,6 +739,21 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
         browser.close()
 
     logger.info("全部分页合并后比赛行数=%s", len(all_rows))
+
+    prefix_set = sorted(
+        {
+            str(r.get("match_no", "") or "").strip()[:2]
+            for r in all_rows
+            if str(r.get("match_no", "") or "").strip()
+        }
+    )
+    has_target_prefix = any(str(r.get("match_no", "") or "").startswith(target_prefix) for r in all_rows)
+    if not has_target_prefix:
+        logger.warning(
+            "前缀不匹配，疑似未切换到目标日期：target_weekday_prefix=%s 当前抓取到的前缀集合=%s",
+            target_prefix,
+            prefix_set,
+        )
 
     deduped = _dedup_records(all_rows)
     logger.info("去重后比赛数=%s", len(deduped))

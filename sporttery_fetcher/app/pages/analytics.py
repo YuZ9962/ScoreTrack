@@ -31,6 +31,32 @@ TIME_MODES = ["按日", "按月", "按年"]
 
 
 
+
+def _run_daily_result_update(base_dir: Path) -> tuple[bool, str]:
+    """Analytics 日常更新链路：只做当前结果更新，不做历史补录流程。"""
+    try:
+        st.info("开始更新比赛结果（analytics 日常更新器）")
+        result = fetch_and_save_results(base_dir)
+    except Exception as exc:
+        return False, f"更新比赛结果失败：{type(exc).__name__}"
+
+    if not result.get("ok"):
+        return False, (
+            "未抓取到可写入赛果："
+            f"issue_date={result.get('issue_date')} mode={result.get('mode')} parsed={result.get('parsed_rows')}"
+        )
+
+    msg = (
+        "更新完成："
+        f"issue_date={result.get('issue_date')} | "
+        f"mode={result.get('mode')} | "
+        f"parsed={result.get('parsed_rows')} | "
+        f"clean={result.get('written_rows')} | "
+        f"bad={result.get('bad_rows', 0)} | "
+        f"matched_predictions={result.get('matched_predictions', 0)}"
+    )
+    return True, msg
+
 def _time_options(df: pd.DataFrame, mode: str) -> list[str]:
     col_map = {"按日": "_date", "按月": "_month", "按年": "_year"}
     col = col_map[mode]
@@ -135,16 +161,14 @@ st.title("📈 统计分析")
 ctx = get_data_context(ROOT)
 render_fetch_section(ROOT)
 
-if st.button("更新比赛结果"):
-    with st.spinner("正在抓取官方赛果并更新..."):
-        try:
-            result = fetch_and_save_results(ROOT)
-            if result.get("ok"):
-                st.success(f"赛果更新完成，共更新 {result.get('parsed_rows')} 场")
-            else:
-                st.warning("未抓取到赛果，请检查开奖页解析逻辑")
-        except Exception:
-            st.error("更新比赛结果失败，请稍后重试")
+if st.button("更新比赛结果", type="primary"):
+    with st.spinner("正在更新当前分析所需赛果..."):
+        ok, message = _run_daily_result_update(ROOT)
+    if ok:
+        st.success(message)
+        st.rerun()
+    else:
+        st.warning(message)
 
 match_df = load_all_matches(ctx)
 match_df = normalize_dataframe(match_df)
