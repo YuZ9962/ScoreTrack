@@ -5,6 +5,8 @@ from typing import Any
 
 import pandas as pd
 
+from utils.common import csv_lock, sales_day_key
+
 PREDICTION_COLUMNS = [
     "issue_date",
     "match_no",
@@ -41,14 +43,6 @@ LEGACY_COLUMN_MAPPING = {
 }
 
 
-def _sales_day_key(issue_date: object, match_no: object) -> str:
-    issue = str(issue_date or "").strip()
-    no = str(match_no or "").strip()
-    if issue and no:
-        return f"{issue}_{no}"
-    return ""
-
-
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
@@ -70,7 +64,9 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "data_source" not in out.columns:
         out["data_source"] = "auto"
     if "sales_day_key" not in out.columns:
-        out["sales_day_key"] = out.apply(lambda r: _sales_day_key(r.get("issue_date"), r.get("match_no")), axis=1)
+        out["sales_day_key"] = out.apply(
+            lambda r: sales_day_key(r.get("issue_date"), r.get("match_no")), axis=1
+        )
 
     for col in PREDICTION_COLUMNS:
         if col not in out.columns:
@@ -101,7 +97,7 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     for key in ["issue_date", "match_no", "raw_id", "home_team", "away_team"]:
         value = normalized.get(key)
         normalized[key] = "" if value is None else str(value).strip()
-    normalized["sales_day_key"] = _sales_day_key(normalized.get("issue_date"), normalized.get("match_no"))
+    normalized["sales_day_key"] = sales_day_key(normalized.get("issue_date"), normalized.get("match_no"))
     if normalized.get("raw_text") in (None, ""):
         normalized["raw_text"] = normalized.get("gemini_raw_text")
     if not str(normalized.get("data_source") or "").strip():
@@ -111,29 +107,31 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
 
 def save_prediction(row: dict[str, Any], base_dir: Path | None = None) -> Path:
     file_path = prediction_file(base_dir)
-    current_df = load_predictions(base_dir)
     new_row = _normalize_row(row)
 
     key_raw_id = new_row.get("raw_id", "")
     key_issue_date = new_row.get("issue_date", "")
 
-    if key_raw_id:
-        dedup_mask = ~(
-            (current_df["issue_date"].astype(str) == key_issue_date)
-            & (current_df["raw_id"].astype(str) == key_raw_id)
-        )
-    else:
-        dedup_mask = ~(
-            (current_df["issue_date"].astype(str) == key_issue_date)
-            & (current_df["match_no"].astype(str) == new_row.get("match_no", ""))
-            & (current_df["home_team"].astype(str) == new_row.get("home_team", ""))
-            & (current_df["away_team"].astype(str) == new_row.get("away_team", ""))
-        )
+    with csv_lock(file_path):
+        current_df = load_predictions(base_dir)
 
-    kept_df = current_df[dedup_mask].copy()
-    out_df = pd.concat([kept_df, pd.DataFrame([new_row])], ignore_index=True)
-    out_df = _ensure_columns(out_df)
-    out_df.to_csv(file_path, index=False, encoding="utf-8-sig")
+        if key_raw_id:
+            dedup_mask = ~(
+                (current_df["issue_date"].astype(str) == key_issue_date)
+                & (current_df["raw_id"].astype(str) == key_raw_id)
+            )
+        else:
+            dedup_mask = ~(
+                (current_df["issue_date"].astype(str) == key_issue_date)
+                & (current_df["match_no"].astype(str) == new_row.get("match_no", ""))
+                & (current_df["home_team"].astype(str) == new_row.get("home_team", ""))
+                & (current_df["away_team"].astype(str) == new_row.get("away_team", ""))
+            )
+
+        kept_df = current_df[dedup_mask].copy()
+        out_df = pd.concat([kept_df, pd.DataFrame([new_row])], ignore_index=True)
+        _ensure_columns(out_df).to_csv(file_path, index=False, encoding="utf-8-sig")
+
     return file_path
 
 
@@ -143,31 +141,34 @@ def delete_predictions(matches: list[dict[str, str]], base_dir: Path | None = No
     file_path = prediction_file(base_dir)
     if not file_path.exists():
         return 0
-    df = load_predictions(base_dir)
-    if df.empty:
-        return 0
 
-    keep_mask = pd.Series([True] * len(df))
-    for m in matches:
-        issue_date = str(m.get("issue_date", "") or "").strip()
-        raw_id = str(m.get("raw_id", "") or "").strip()
-        match_no = str(m.get("match_no", "") or "").strip()
-        home = str(m.get("home_team", "") or "").strip()
-        away = str(m.get("away_team", "") or "").strip()
-        if raw_id:
-            keep_mask &= ~(
-                (df["issue_date"].astype(str) == issue_date)
-                & (df["raw_id"].astype(str) == raw_id)
-            )
-        else:
-            keep_mask &= ~(
-                (df["issue_date"].astype(str) == issue_date)
-                & (df["match_no"].astype(str) == match_no)
-                & (df["home_team"].astype(str) == home)
-                & (df["away_team"].astype(str) == away)
-            )
+    with csv_lock(file_path):
+        df = load_predictions(base_dir)
+        if df.empty:
+            return 0
 
-    new_df = df[keep_mask].copy()
-    deleted = len(df) - len(new_df)
-    _ensure_columns(new_df).to_csv(file_path, index=False, encoding="utf-8-sig")
+        keep_mask = pd.Series([True] * len(df))
+        for m in matches:
+            issue_date = str(m.get("issue_date", "") or "").strip()
+            raw_id = str(m.get("raw_id", "") or "").strip()
+            match_no = str(m.get("match_no", "") or "").strip()
+            home = str(m.get("home_team", "") or "").strip()
+            away = str(m.get("away_team", "") or "").strip()
+            if raw_id:
+                keep_mask &= ~(
+                    (df["issue_date"].astype(str) == issue_date)
+                    & (df["raw_id"].astype(str) == raw_id)
+                )
+            else:
+                keep_mask &= ~(
+                    (df["issue_date"].astype(str) == issue_date)
+                    & (df["match_no"].astype(str) == match_no)
+                    & (df["home_team"].astype(str) == home)
+                    & (df["away_team"].astype(str) == away)
+                )
+
+        new_df = df[keep_mask].copy()
+        deleted = len(df) - len(new_df)
+        _ensure_columns(new_df).to_csv(file_path, index=False, encoding="utf-8-sig")
+
     return deleted

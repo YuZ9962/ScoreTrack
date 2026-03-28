@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from utils.common import sales_day_key as _sales_day_key_fn
+
 logger = logging.getLogger("result_evaluator")
 
 
@@ -51,11 +53,7 @@ def _judge_hit(real_result: object, main_pick: object, secondary_pick: object) -
 
 
 def _sales_day_key(issue_date: object, match_no: object) -> str:
-    issue = _normalize_pick(issue_date)
-    no = _normalize_pick(match_no)
-    if issue and no:
-        return f"{issue}_{no}"
-    return ""
+    return _sales_day_key_fn(issue_date, match_no)
 
 
 def _pick_latest(matched: pd.DataFrame) -> pd.Series | None:

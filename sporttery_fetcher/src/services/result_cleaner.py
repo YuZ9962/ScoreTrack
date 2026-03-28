@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from filelock import FileLock
 
 RESULT_COLUMNS = [
     "issue_date",
@@ -381,9 +382,11 @@ def rebuild_clean_results(base_dir: Path | None = None, source_mode: str = "repa
     clean_df = pd.DataFrame(dedup_clean, columns=RESULT_COLUMNS)
     bad_df = pd.DataFrame(bad_rows, columns=BAD_COLUMNS)
 
-    clean_df.to_csv(paths["clean"], index=False, encoding="utf-8-sig")
-    bad_df.to_csv(paths["bad"], index=False, encoding="utf-8-sig")
-    clean_df.to_csv(paths["legacy"], index=False, encoding="utf-8-sig")
+    lock = FileLock(str(paths["clean"]) + ".lock", timeout=10)
+    with lock:
+        clean_df.to_csv(paths["clean"], index=False, encoding="utf-8-sig")
+        bad_df.to_csv(paths["bad"], index=False, encoding="utf-8-sig")
+        clean_df.to_csv(paths["legacy"], index=False, encoding="utf-8-sig")
 
     bad_samples = bad_df.head(3)[["match_no", "bad_reason"]].to_dict("records") if not bad_df.empty else []
     logger.info(
@@ -429,7 +432,9 @@ def append_raw_results(records: list[dict[str, Any]], data_source: str, base_dir
         new_aligned = new_df.reindex(columns=RAW_COLUMNS)
         merged = pd.concat([old_aligned, new_aligned], ignore_index=True)
 
-    merged.to_csv(paths["raw"], index=False, encoding="utf-8-sig")
+    raw_lock = FileLock(str(paths["raw"]) + ".lock", timeout=10)
+    with raw_lock:
+        merged.to_csv(paths["raw"], index=False, encoding="utf-8-sig")
 
     stats = rebuild_clean_results(base_dir, source_mode=src)
     stats["appended_raw"] = len(new_df)
