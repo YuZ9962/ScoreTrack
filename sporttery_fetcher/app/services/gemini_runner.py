@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any
 
 from google import genai
@@ -12,6 +11,8 @@ try:
 except Exception:  # pragma: no cover
     genai_types = None
 
+from utils.common import now_iso
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-3-flash-preview"
@@ -19,11 +20,9 @@ DEFAULT_THINKING_LEVEL = "high"
 ALLOWED_THINKING_LEVELS = {"minimal", "low", "medium", "high"}
 
 
-
 def _resolve_model() -> str:
     model = (os.getenv("GEMINI_MODEL") or "").strip()
     return model or DEFAULT_MODEL
-
 
 
 def _resolve_thinking_level() -> str:
@@ -31,7 +30,6 @@ def _resolve_thinking_level() -> str:
     if level in ALLOWED_THINKING_LEVELS:
         return level
     return DEFAULT_THINKING_LEVEL
-
 
 
 def _build_client() -> tuple[genai.Client | None, str | None]:
@@ -46,12 +44,10 @@ def _build_client() -> tuple[genai.Client | None, str | None]:
         return None, "Gemini 请求失败，请检查模型配置或 API key"
 
 
-
 def _is_thinking_config_error(exc: Exception) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     keywords = ["thinking_config", "extra inputs are not permitted", "extra_forbidden", "validationerror"]
     return any(k in text for k in keywords)
-
 
 
 def _build_thinking_config(thinking_level: str):
@@ -62,10 +58,27 @@ def _build_thinking_config(thinking_level: str):
     )
 
 
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
+def _make_result(
+    ok: bool,
+    *,
+    model: str,
+    thinking_level: str,
+    thinking_applied: bool,
+    prompt: str,
+    text: str,
+    error: str,
+) -> dict[str, Any]:
+    """Build a uniform result dict for all Gemini call paths."""
+    return {
+        "ok": ok,
+        "model": model,
+        "thinking_level": thinking_level,
+        "thinking_applied": thinking_applied,
+        "prompt": prompt,
+        "text": text,
+        "generated_at": now_iso(),
+        "error": error,
+    }
 
 
 def run_gemini_prediction(prompt: str) -> dict[str, Any]:
@@ -74,16 +87,8 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
 
     client, err = _build_client()
     if err:
-        return {
-            "ok": False,
-            "model": model,
-            "thinking_level": thinking_level,
-            "thinking_applied": False,
-            "prompt": prompt,
-            "text": "",
-            "generated_at": _now_iso(),
-            "error": err,
-        }
+        return _make_result(False, model=model, thinking_level=thinking_level,
+                            thinking_applied=False, prompt=prompt, text="", error=err)
 
     try:
         config = _build_thinking_config(thinking_level)
@@ -94,78 +99,31 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
         )
         text = (response.text or "").strip()
         if not text:
-            return {
-                "ok": False,
-                "model": model,
-                "thinking_level": thinking_level,
-                "thinking_applied": True,
-                "prompt": prompt,
-                "text": "",
-                "generated_at": _now_iso(),
-                "error": "Gemini 返回为空",
-            }
-        return {
-            "ok": True,
-            "model": model,
-            "thinking_level": thinking_level,
-            "thinking_applied": True,
-            "prompt": prompt,
-            "text": text,
-            "generated_at": _now_iso(),
-            "error": "",
-        }
+            return _make_result(False, model=model, thinking_level=thinking_level,
+                                thinking_applied=True, prompt=prompt, text="",
+                                error="Gemini 返回为空")
+        return _make_result(True, model=model, thinking_level=thinking_level,
+                            thinking_applied=True, prompt=prompt, text=text, error="")
     except Exception as exc:
         if _is_thinking_config_error(exc):
             logger.warning("Gemini thinking_config 不兼容，自动回退无 thinking 模式: %s", type(exc).__name__)
         else:
             logger.exception("Gemini（thinking 模式）请求失败")
-            return {
-                "ok": False,
-                "model": model,
-                "thinking_level": thinking_level,
-                "thinking_applied": False,
-                "prompt": prompt,
-                "text": "",
-                "generated_at": _now_iso(),
-                "error": "Gemini 请求失败，请检查模型配置或 API key",
-            }
+            return _make_result(False, model=model, thinking_level=thinking_level,
+                                thinking_applied=False, prompt=prompt, text="",
+                                error="Gemini 请求失败，请检查模型配置或 API key")
 
     try:
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-        )
+        response = client.models.generate_content(model=model, contents=prompt)
         text = (response.text or "").strip()
         if not text:
-            return {
-                "ok": False,
-                "model": model,
-                "thinking_level": thinking_level,
-                "thinking_applied": False,
-                "prompt": prompt,
-                "text": "",
-                "generated_at": _now_iso(),
-                "error": "Gemini 返回为空",
-            }
-        return {
-            "ok": True,
-            "model": model,
-            "thinking_level": thinking_level,
-            "thinking_applied": False,
-            "prompt": prompt,
-            "text": text,
-            "generated_at": _now_iso(),
-            "error": "",
-        }
+            return _make_result(False, model=model, thinking_level=thinking_level,
+                                thinking_applied=False, prompt=prompt, text="",
+                                error="Gemini 返回为空")
+        return _make_result(True, model=model, thinking_level=thinking_level,
+                            thinking_applied=False, prompt=prompt, text=text, error="")
     except Exception:
         logger.exception("Gemini（回退无 thinking 模式）请求失败")
-        return {
-            "ok": False,
-            "model": model,
-            "thinking_level": thinking_level,
-            "thinking_applied": False,
-            "prompt": prompt,
-            "text": "",
-            "generated_at": _now_iso(),
-            "error": "Gemini 请求失败，请检查模型配置或 API key",
-        }
+        return _make_result(False, model=model, thinking_level=thinking_level,
+                            thinking_applied=False, prompt=prompt, text="",
+                            error="Gemini 请求失败，请检查模型配置或 API key")
