@@ -15,6 +15,7 @@ logger = get_logger("zqsgkj_fetcher")
 
 ZQSGKJ_URL = "https://www.sporttery.cn/jc/zqsgkj/"
 MATCH_NO_RE = re.compile(r"^周[一二三四五六日]\d{3}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TEAM_RE = re.compile(r"^(.+?)(\(([+-]?\d+)\))?VS(.+)$")
 MAX_PAGINATION_PAGES = 20
 
@@ -47,7 +48,7 @@ OUTPUT_COLUMNS = [
     "scrape_time",
 ]
 
-TABLE_HINT_KEYWORDS = ["赛事编号", "主队", "客队", "全场比分", "胜", "平", "负"]
+HEADER_KEYWORDS = ["赛事日期", "赛事编号", "联赛", "主队", "客队", "半场比分", "全场比分", "胜", "平", "负"]
 
 
 def _target_weekday_prefix(issue_date: str) -> str:
@@ -193,6 +194,51 @@ def _extract_total_pages_hint(page: Any) -> int | None:
     return max(values)
 
 
+def _row_cells_text(tr: Any, selectors: list[str]) -> list[str]:
+    for selector in selectors:
+        try:
+            nodes = tr.locator(selector)
+            cnt = nodes.count()
+        except Exception:
+            cnt = 0
+        if cnt > 0:
+            return [nodes.nth(i).inner_text(timeout=800).strip() for i in range(cnt)]
+    return []
+
+
+def _get_first_row_cells(table: Any) -> list[str]:
+    candidates = ["thead tr", "tbody tr", "tr"]
+    for row_selector in candidates:
+        try:
+            rows = table.locator(row_selector)
+            count = rows.count()
+        except Exception:
+            count = 0
+        if count <= 0:
+            continue
+        first = rows.nth(0)
+        cells = _row_cells_text(first, ["th", "td"])
+        if cells:
+            return cells
+    return []
+
+
+def _is_header_table(first_row_cells: list[str]) -> bool:
+    if not first_row_cells:
+        return False
+    text = " ".join(first_row_cells)
+    hit = sum(1 for kw in HEADER_KEYWORDS if kw in text)
+    return hit >= 5
+
+
+def _is_data_table(first_row_cells: list[str]) -> bool:
+    if len(first_row_cells) < 2:
+        return False
+    first_col = str(first_row_cells[0]).strip()
+    second_col = str(first_row_cells[1]).strip()
+    return bool(DATE_RE.match(first_col) and MATCH_NO_RE.match(second_col))
+
+
 def _collect_table_debug(page: Any) -> list[dict[str, Any]]:
     table_infos: list[dict[str, Any]] = []
     tables = page.locator("table")
@@ -203,104 +249,130 @@ def _collect_table_debug(page: Any) -> list[dict[str, Any]]:
 
     for idx in range(table_count):
         table = tables.nth(idx)
-        try:
-            header = table.locator("thead").first.inner_text(timeout=800).strip()
-        except Exception:
-            header = ""
-        if not header:
-            try:
-                first_row = table.locator("tr").first.inner_text(timeout=800).strip()
-                header = first_row
-            except Exception:
-                header = ""
-
+        first_cells = _get_first_row_cells(table)
+        first_text = " | ".join(first_cells)
         samples: list[str] = []
         try:
-            body_rows = table.locator("tbody tr")
-            body_count = body_rows.count()
-            for i in range(min(3, body_count)):
-                samples.append(body_rows.nth(i).inner_text(timeout=800).strip())
+            rows = table.locator("tbody tr")
+            rc = rows.count()
+            for i in range(min(3, rc)):
+                row_cells = _row_cells_text(rows.nth(i), ["td", "th"])
+                samples.append(" | ".join(row_cells[:2]))
         except Exception:
-            try:
-                rows = table.locator("tr")
-                row_count = rows.count()
-                for i in range(min(3, max(0, row_count - 1))):
-                    samples.append(rows.nth(i + 1).inner_text(timeout=800).strip())
-            except Exception:
-                pass
+            pass
 
-        joined = f"{header} {' '.join(samples)}"
-        score = sum(1 for kw in TABLE_HINT_KEYWORDS if kw in joined)
-        table_infos.append({"index": idx, "header": header, "samples": samples, "score": score})
+        info = {
+            "index": idx,
+            "first_cells": first_cells,
+            "first_text": first_text,
+            "samples": samples,
+            "is_header": _is_header_table(first_cells),
+            "is_data": _is_data_table(first_cells),
+        }
+        table_infos.append(info)
 
     logger.info("查询后命中的 table 数量=%s", table_count)
     for info in table_infos:
         logger.info(
-            "table[%s] score=%s header=%s sample_rows=%s",
+            "table[%s] is_header=%s is_data=%s first_row=%s sample_rows=%s",
             info["index"],
-            info["score"],
-            info["header"],
+            info["is_header"],
+            info["is_data"],
+            info["first_text"],
             info["samples"],
         )
     return table_infos
 
 
-def _select_results_table(page: Any) -> tuple[Any | None, int | None]:
+def _select_header_and_data_table(page: Any) -> tuple[Any | None, Any | None, int | None, int | None]:
     infos = _collect_table_debug(page)
     if not infos:
-        return None, None
+        return None, None, None, None
 
-    best = sorted(infos, key=lambda x: (x["score"], len(x["samples"])), reverse=True)[0]
-    if best["score"] <= 0:
-        return None, None
+    header_idx: int | None = None
+    data_idx: int | None = None
 
-    idx = int(best["index"])
-    table = page.locator("table").nth(idx)
-    logger.info("当前实际选中的 table 索引=%s score=%s", idx, best["score"])
-    return table, idx
+    for info in infos:
+        if info["is_header"] and header_idx is None:
+            header_idx = int(info["index"])
+
+    # 优先选择“在 header 表后面的 data 表”
+    for info in infos:
+        if info["is_data"]:
+            idx = int(info["index"])
+            if header_idx is not None and idx > header_idx:
+                data_idx = idx
+                break
+            if data_idx is None:
+                data_idx = idx
+
+    header_table = page.locator("table").nth(header_idx) if header_idx is not None else None
+    data_table = page.locator("table").nth(data_idx) if data_idx is not None else None
+
+    logger.info("识别到的表头表 index=%s", header_idx)
+    logger.info("识别到的数据表 index=%s", data_idx)
+    return header_table, data_table, header_idx, data_idx
 
 
-def _parse_rows_from_table(table: Any, issue_date: str) -> list[dict[str, str]]:
+def _parse_rows_from_data_table(data_table: Any, issue_date: str) -> list[dict[str, str]]:
     rows_out: list[dict[str, str]] = []
-
-    # 优先 tbody tr；若没有则退化到 tr
-    row_locator = table.locator("tbody tr")
+    body_rows = data_table.locator("tbody tr")
     try:
-        row_count = row_locator.count()
+        row_count = body_rows.count()
     except Exception:
         row_count = 0
 
     if row_count == 0:
-        row_locator = table.locator("tr")
+        body_rows = data_table.locator("tr")
         try:
-            row_count = row_locator.count()
+            row_count = body_rows.count()
         except Exception:
             row_count = 0
 
+    # 输出前3行的首列/第二列用于日志
+    first_three: list[tuple[str, str]] = []
+
     for i in range(row_count):
-        tr = row_locator.nth(i)
+        tr = body_rows.nth(i)
         td_nodes = tr.locator("td")
         td_count = td_nodes.count()
         if td_count < 9:
             continue
         cols = [td_nodes.nth(j).inner_text().strip() for j in range(td_count)]
-        match_no = cols[1] if len(cols) > 1 else ""
+        first_col = cols[0] if len(cols) > 0 else ""
+        second_col = cols[1] if len(cols) > 1 else ""
+        if len(first_three) < 3:
+            first_three.append((first_col, second_col))
+
+        match_no = second_col
         if not MATCH_NO_RE.match(match_no):
             continue
+
         try:
             rows_out.append(_row_to_record(issue_date, cols))
         except Exception:
             logger.exception("解析单行失败，已跳过 row_index=%s", i)
 
+    logger.info("数据表前3行首列/第二列=%s", first_three)
     return rows_out
 
 
 def _parse_current_page_rows(page: Any, issue_date: str) -> tuple[list[dict[str, str]], str]:
-    table, table_idx = _select_results_table(page)
-    if table is None:
-        return [], "no_result_table"
-    rows = _parse_rows_from_table(table, issue_date)
-    return rows, f"table_index={table_idx}"
+    header_table, data_table, header_idx, data_idx = _select_header_and_data_table(page)
+
+    # 两段式：header + data
+    if header_table is not None and data_table is not None:
+        rows = _parse_rows_from_data_table(data_table, issue_date)
+        logger.info("两段式解析完成 header_idx=%s data_idx=%s 解析比赛行数=%s", header_idx, data_idx, len(rows))
+        return rows, f"two_stage(header={header_idx},data={data_idx})"
+
+    # 回退：单table混合结构
+    if data_table is not None:
+        rows = _parse_rows_from_data_table(data_table, issue_date)
+        logger.info("回退单表解析完成 data_idx=%s 解析比赛行数=%s", data_idx, len(rows))
+        return rows, f"single_table(data={data_idx})"
+
+    return [], "no_result_table"
 
 
 def _first_match_no(rows: list[dict[str, str]]) -> str:
@@ -368,7 +440,6 @@ def _click_next_page(page: Any, previous_signature: str, before_first_match_no: 
             changed = True
             break
 
-    # 尝试解析点击后的首条 match_no，用于日志
     page_rows_after, _ = _parse_current_page_rows(page, issue_date="")
     after_first_match_no = _first_match_no(page_rows_after)
     logger.info(
@@ -438,7 +509,6 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
                 page_rows, parse_hint = _parse_current_page_rows(page, issue_date)
                 logger.info("抓取第%s页，原始比赛行数=%s parse_hint=%s", page_index, len(page_rows), parse_hint)
 
-                # 首次解析为 0 时，做一次增强等待+重新识别+快照，不立即判定无数据
                 if page_index == 1 and len(page_rows) == 0:
                     logger.warning("第1页解析为0行，触发增强重试与候选表重识别")
                     page.wait_for_timeout(2500)
@@ -461,7 +531,6 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
                     break
                 visited_signatures.add(signature)
 
-                # 第1页都没有有效行时，仍尝试一次下一页判断；若无变化则自然结束
                 before_first_no = _first_match_no(page_rows)
 
                 if page_index >= MAX_PAGINATION_PAGES:
