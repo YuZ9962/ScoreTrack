@@ -459,33 +459,121 @@ def _wait_matchlist_updated(page: Any, old_state: dict[str, Any], timeout_ms: in
     return False, _extract_matchlist_state(page)
 
 
+def _diagnose_date_inputs(page: Any) -> dict[str, Any]:
+    """扫描页面上所有可能的日期输入控件，用于调试 js_set_ok=False 场景。"""
+    try:
+        return page.evaluate(
+            r"""
+            () => {
+                const inputs = Array.from(document.querySelectorAll("input"));
+                return inputs.map(el => ({
+                    id: el.id || "",
+                    name: el.name || "",
+                    type: el.type || "",
+                    placeholder: el.placeholder || "",
+                    value: el.value || "",
+                    className: el.className || "",
+                })).filter(i =>
+                    i.type === "text" || i.type === "date" ||
+                    /date|start|end|begin/i.test(i.id + i.name + i.placeholder)
+                ).slice(0, 10);
+            }
+            """
+        )
+    except Exception:
+        return {}
+
+
+def _fill_date_input(page: Any, selectors: list[str], value: str) -> bool:
+    """尝试多种方式填写日期输入框，返回是否成功。"""
+    for sel in selectors:
+        # 1) Playwright fill() — 最可靠
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                loc.triple_click(timeout=2000)
+                loc.fill(value, timeout=2000)
+                loc.dispatch_event("input")
+                loc.dispatch_event("change")
+                actual = loc.input_value(timeout=1000)
+                if value in actual or actual in value:
+                    return True
+        except Exception:
+            pass
+
+        # 2) JS 直接赋值 + 事件
+        try:
+            ok = page.evaluate(
+                """
+                ([sel, val]) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    el.value = val;
+                    el.dispatchEvent(new Event("input", { bubbles: true }));
+                    el.dispatchEvent(new Event("change", { bubbles: true }));
+                    el.dispatchEvent(new Event("blur",  { bubbles: true }));
+                    return true;
+                }
+                """,
+                [sel, value],
+            )
+            if ok:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 def _submit_query_with_js_priority(page: Any, start_date: str, end_date: str) -> tuple[bool, bool, str]:
     js_set_ok = False
     click_submit_ok = False
     submit_mode = "none"
 
-    try:
-        set_ret = page.evaluate(
-            """
-            ([startDate, endDate]) => {
-                const s = document.querySelector("#start_date");
-                const e = document.querySelector("#end_date");
-                if (!s || !e) return false;
-                s.value = startDate;
-                e.value = endDate;
-                s.dispatchEvent(new Event("input", { bubbles: true }));
-                s.dispatchEvent(new Event("change", { bubbles: true }));
-                e.dispatchEvent(new Event("input", { bubbles: true }));
-                e.dispatchEvent(new Event("change", { bubbles: true }));
-                return true;
-            }
-            """,
-            [start_date, end_date],
-        )
-        js_set_ok = bool(set_ret)
-    except Exception:
-        logger.exception("JS设定查询日期失败")
+    # 候选选择器（从精确到宽泛）
+    start_selectors = [
+        "#start_date",
+        "#startDate",
+        "#queryStartDate",
+        "#beginDate",
+        "input[id*='start']",
+        "input[name*='start']",
+        "input[name*='begin']",
+        "input[placeholder*='开始']",
+        "input[placeholder*='起始']",
+        "input[type='text']:first-of-type",
+    ]
+    end_selectors = [
+        "#end_date",
+        "#endDate",
+        "#queryEndDate",
+        "input[id*='end']",
+        "input[name*='end']",
+        "input[placeholder*='结束']",
+        "input[placeholder*='截止']",
+        "input[type='text']:last-of-type",
+    ]
 
+    # 先诊断页面上有哪些日期输入框
+    date_inputs = _diagnose_date_inputs(page)
+    logger.info("页面日期输入框诊断结果=%s", date_inputs)
+
+    # 动态补充从诊断结果中发现的选择器
+    for info in date_inputs:
+        el_id = info.get("id", "")
+        el_name = info.get("name", "")
+        if el_id and f"#{el_id}" not in start_selectors:
+            start_selectors.insert(0, f"#{el_id}")
+        if el_name and f"[name='{el_name}']" not in start_selectors:
+            start_selectors.insert(1, f"[name='{el_name}']")
+
+    start_ok = _fill_date_input(page, start_selectors, start_date)
+    end_ok = _fill_date_input(page, end_selectors, end_date)
+    js_set_ok = start_ok or end_ok
+    if not js_set_ok:
+        logger.warning("所有候选选择器均未能设定日期，将使用 URL 参数兜底")
+
+    # 尝试 click_submit()
     try:
         click_ret = page.evaluate(
             """
@@ -606,6 +694,29 @@ def _dedup_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
     return list(buckets.values())
 
 
+def _try_url_param_navigation(page: Any, start_date: str, end_date: str) -> bool:
+    """尝试通过 URL 查询参数直接导航到目标日期范围，作为表单填写失败时的兜底方案。"""
+    param_variants = [
+        f"{ZQSGKJ_URL}?startDate={start_date}&endDate={end_date}",
+        f"{ZQSGKJ_URL}?start_date={start_date}&end_date={end_date}",
+        f"{ZQSGKJ_URL}?beginDate={start_date}&endDate={end_date}",
+        f"{ZQSGKJ_URL}?queryStartDate={start_date}&queryEndDate={end_date}",
+    ]
+    for url in param_variants:
+        try:
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2000)
+            state = _extract_matchlist_state(page)
+            first_date = state.get("first_date", "")
+            if first_date and first_date == start_date:
+                logger.info("URL参数导航成功 url=%s first_date=%s", url, first_date)
+                return True
+            logger.info("URL参数导航后首条日期=%s（期望=%s），继续尝试下一个", first_date, start_date)
+        except Exception:
+            logger.exception("URL参数导航失败 url=%s", url)
+    return False
+
+
 def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
     from playwright.sync_api import sync_playwright
 
@@ -669,6 +780,23 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
             new_state.get("update_time"),
             new_state.get("html_excerpt"),
         )
+
+        # 若表单填写失败（js_set_ok=False）或者加载了错误日期，尝试 URL 参数兜底
+        loaded_first_date = new_state.get("first_date", "")
+        date_mismatch = loaded_first_date and loaded_first_date != start_date
+        if not js_set_ok or date_mismatch:
+            logger.warning(
+                "表单日期设置失败或返回数据日期不符（loaded=%s expect=%s），尝试URL参数兜底导航",
+                loaded_first_date,
+                start_date,
+            )
+            url_ok = _try_url_param_navigation(page, start_date, end_date)
+            if url_ok:
+                changed = True
+                new_state = _extract_matchlist_state(page)
+                logger.info("URL参数兜底成功 new_first_date=%s", new_state.get("first_date"))
+            else:
+                logger.warning("URL参数兜底也未能定位到目标日期，继续使用当前页面数据（将依赖 match_date 字段过滤）")
 
         if not changed:
             logger.warning("日期查询未生效：#matchList在两次提交后仍未变化，停止后续过滤链路")
@@ -758,10 +886,30 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
     deduped = _dedup_records(all_rows)
     logger.info("去重后比赛数=%s", len(deduped))
 
+    # 主过滤：match_no 的 weekday 前缀精确匹配
     filtered = [r for r in deduped if str(r.get("match_no", "")).startswith(target_prefix)]
     logger.info("weekday 前缀过滤后的比赛数=%s", len(filtered))
 
-    logger.info("去重后最终比赛数=%s", len(filtered))
+    # 降级过滤：若 weekday 前缀匹配失败，改用 match_date 字段精确匹配 issue_date
+    # 场景：表单日期填写失败但 URL 兜底也未成功，或者同批次数据里混有目标日期记录
+    if not filtered:
+        date_filtered = [r for r in deduped if str(r.get("match_date", "")).strip() == issue_date]
+        if date_filtered:
+            logger.info(
+                "weekday前缀匹配0条，降级使用 match_date=%s 精确过滤，命中 %s 条",
+                issue_date,
+                len(date_filtered),
+            )
+            filtered = date_filtered
+        else:
+            logger.warning(
+                "weekday前缀与match_date两级过滤均为0，可能原因：(1)表单日期设置失败且URL兜底无效 "
+                "(2) %s 确实无竞彩足球赛事。prefix_set=%s",
+                issue_date,
+                prefix_set,
+            )
+
+    logger.info("最终返回比赛数=%s", len(filtered))
     return filtered
 
 
