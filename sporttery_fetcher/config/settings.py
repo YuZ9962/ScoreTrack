@@ -41,13 +41,25 @@ class Settings:
         i.strip() for i in os.getenv("API_CANDIDATE_URLS", "").split(",") if i.strip()
     )
 
-    # 旧赛程页保留为 fallback/扩展
+    # lottery.gov.cn 官方政府彩票网站（优先）
+    lottery_schedule_url: str = os.getenv(
+        "LOTTERY_SCHEDULE_URL",
+        "https://www.lottery.gov.cn/jc/zqszsc",
+    )
+    lottery_result_url: str = os.getenv(
+        "LOTTERY_RESULT_URL",
+        "https://www.lottery.gov.cn/jc/zqsgkj",
+    )
+
+    # 赛程页（lottery.gov.cn 优先，sporttery.cn 兜底）
     schedule_urls: tuple[str, ...] = (
+        lottery_schedule_url,
         primary_page_url,
         "https://www.sporttery.cn/jc/zqszsc/",
         "https://www.sporttery.cn/jc/zqszsc/index.shtml",
     )
     result_urls: tuple[str, ...] = (
+        lottery_result_url,
         "https://www.sporttery.cn/jc/zqsgkj/",
         "https://www.sporttery.cn/jc/zqsgkj/index.shtml",
     )

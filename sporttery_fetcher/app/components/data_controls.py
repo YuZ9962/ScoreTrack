@@ -31,6 +31,9 @@ def render_fetch_section(project_root: Path) -> None:
     if result:
         if result.get("ok"):
             st.sidebar.success(result.get("message", "抓取成功"))
+            src = result.get("strategy", "")
+            if src:
+                st.sidebar.caption(f"📡 来源：{src}")
         else:
             st.sidebar.error(result.get("message", "抓取失败"))
 

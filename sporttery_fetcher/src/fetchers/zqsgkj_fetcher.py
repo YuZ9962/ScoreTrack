@@ -14,6 +14,9 @@ from src.utils.logger import get_logger
 logger = get_logger("zqsgkj_fetcher")
 
 ZQSGKJ_URL = "https://www.sporttery.cn/jc/zqsgkj/"
+
+# 多 URL 候选：lottery.gov.cn 优先，sporttery.cn 兜底
+_RESULT_CANDIDATE_URLS: list[str] = []  # 延迟初始化，避免循环导入
 MATCH_NO_RE = re.compile(r"^周[一二三四五六日]\d{3}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TEAM_RE = re.compile(r"^(.+?)(\(([+-]?\d+)\))?VS(.+)$")
@@ -904,13 +907,13 @@ def _dedup_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
     return list(buckets.values())
 
 
-def _try_url_param_navigation(page: Any, start_date: str, end_date: str) -> bool:
+def _try_url_param_navigation(page: Any, start_date: str, end_date: str, base_url: str = ZQSGKJ_URL) -> bool:
     """尝试通过 URL 查询参数直接导航到目标日期范围，作为表单填写失败时的兜底方案。"""
     param_variants = [
-        f"{ZQSGKJ_URL}?startDate={start_date}&endDate={end_date}",
-        f"{ZQSGKJ_URL}?start_date={start_date}&end_date={end_date}",
-        f"{ZQSGKJ_URL}?beginDate={start_date}&endDate={end_date}",
-        f"{ZQSGKJ_URL}?queryStartDate={start_date}&queryEndDate={end_date}",
+        f"{base_url}?startDate={start_date}&endDate={end_date}",
+        f"{base_url}?start_date={start_date}&end_date={end_date}",
+        f"{base_url}?beginDate={start_date}&endDate={end_date}",
+        f"{base_url}?queryStartDate={start_date}&queryEndDate={end_date}",
     ]
     for url in param_variants:
         try:
@@ -927,14 +930,47 @@ def _try_url_param_navigation(page: Any, start_date: str, end_date: str) -> bool
     return False
 
 
+def _get_result_candidate_urls() -> list[str]:
+    """延迟获取候选 URL 列表（避免模块加载时循环导入）。"""
+    if not _RESULT_CANDIDATE_URLS:
+        lottery_url = settings.lottery_result_url
+        urls = [lottery_url, ZQSGKJ_URL]
+        # 去重保序
+        seen: set[str] = set()
+        result = []
+        for u in urls:
+            if u and u not in seen:
+                seen.add(u)
+                result.append(u)
+        return result
+    return _RESULT_CANDIDATE_URLS
+
+
 def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
+    """从多个候选 URL（lottery.gov.cn 优先，sporttery.cn 兜底）抓取历史赛果。"""
+    candidate_urls = _get_result_candidate_urls()
+    for url in candidate_urls:
+        try:
+            logger.info("尝试抓取赛果 url=%s issue_date=%s", url, issue_date)
+            rows = _fetch_zqsgkj_from_url(issue_date, url)
+            if rows:
+                logger.info("赛果抓取成功 url=%s count=%s", url, len(rows))
+                return rows
+            logger.info("赛果抓取返回0条 url=%s，尝试下一个候选", url)
+        except Exception as exc:
+            logger.warning("赛果抓取异常 url=%s err=%s，尝试下一个候选", url, type(exc).__name__)
+    logger.warning("所有候选 URL 均未返回赛果 issue_date=%s", issue_date)
+    return []
+
+
+def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str]]:
     from playwright.sync_api import sync_playwright
 
     start_date = issue_date
     end_date = (datetime.strptime(issue_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
     target_prefix = _target_weekday_prefix(issue_date)
 
-    logger.info("开始抓取历史赛果 issue_date=%s", issue_date)
+    logger.info("开始抓取历史赛果 issue_date=%s base_url=%s", issue_date, base_url)
     logger.info("查询日期范围 start_date=%s end_date=%s", start_date, end_date)
     logger.info("target_weekday_prefix=%s", target_prefix)
 
@@ -945,7 +981,7 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
         context = browser.new_context(user_agent=settings.user_agent)
         page = context.new_page()
 
-        page.goto(ZQSGKJ_URL, wait_until="domcontentloaded", timeout=settings.request_timeout * 1000)
+        page.goto(base_url, wait_until="domcontentloaded", timeout=settings.request_timeout * 1000)
 
         # 等待SPA通过 commonV1Fun.loadHtml() 将表单注入 #sgkj_991
         form_ready = _wait_for_form_ready(page, timeout_ms=18000)
@@ -1009,7 +1045,7 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
             logger.warning(
                 "表单日期填写失败（js_set_ok=False），尝试URL参数兜底导航",
             )
-            url_ok = _try_url_param_navigation(page, start_date, end_date)
+            url_ok = _try_url_param_navigation(page, start_date, end_date, base_url=base_url)
             if url_ok:
                 changed = True
                 new_state = _extract_matchlist_state(page)

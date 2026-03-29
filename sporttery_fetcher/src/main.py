@@ -10,6 +10,7 @@ from config.settings import settings
 from src.fetchers.api_fetcher import APIFetcher
 from src.fetchers.html_fetcher import HTMLFetcher
 from src.fetchers.mobile_fetcher import MobileFetcher
+from src.fetchers.lottery_schedule_fetcher import fetch_lottery_schedule
 from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches, save_zqsgkj_results
 from src.parsers.normalize import normalize_matches
 from src.utils.logger import get_logger
@@ -45,6 +46,32 @@ def run(issue_date: str) -> dict[str, Any]:
             "json_path": str(json_path),
             "csv_path": str(csv_path),
             "source_url": "https://www.sporttery.cn/jc/zqsgkj/",
+        }
+
+    # 未开始赛程：lottery.gov.cn/jc/zqszsc
+    try:
+        lottery_rows = fetch_lottery_schedule(issue_date)
+    except Exception as exc:
+        logger.warning("lottery 赛程抓取失败，回退后续流程 err=%s", type(exc).__name__)
+        lottery_rows = []
+
+    if lottery_rows:
+        normalized = normalize_matches(lottery_rows, issue_date=issue_date, source_url=settings.lottery_schedule_url)
+        handicap_non_empty = sum(1 for r in normalized if r.get("handicap") not in (None, ""))
+        spf_full_non_empty = _triple_non_empty_count(normalized, ("spf_win", "spf_draw", "spf_lose"))
+        rqspf_full_non_empty = _triple_non_empty_count(normalized, ("rqspf_win", "rqspf_draw", "rqspf_lose"))
+        json_path = save_json(normalized, issue_date)
+        csv_path = save_csv(normalized, issue_date)
+        logger.info("lottery 赛程抓取成功 count=%s json=%s csv=%s", len(normalized), json_path, csv_path)
+        return {
+            "count": len(normalized),
+            "strategy": "lottery_schedule",
+            "handicap_non_empty": handicap_non_empty,
+            "spf_full_non_empty": spf_full_non_empty,
+            "rqspf_full_non_empty": rqspf_full_non_empty,
+            "json_path": str(json_path),
+            "csv_path": str(csv_path),
+            "source_url": settings.lottery_schedule_url,
         }
 
     logger.info("当前主页面: %s", settings.primary_page_url)
