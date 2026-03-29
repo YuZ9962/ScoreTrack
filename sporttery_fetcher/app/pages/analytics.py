@@ -32,11 +32,11 @@ TIME_MODES = ["按日", "按月", "按年"]
 
 
 
-def _run_daily_result_update(base_dir: Path) -> tuple[bool, str]:
+def _run_daily_result_update(base_dir: Path, issue_date: str | None = None) -> tuple[bool, str]:
     """Analytics 日常更新链路：只做当前结果更新，不做历史补录流程。"""
     try:
         st.info("开始更新比赛结果（analytics 日常更新器）")
-        result = fetch_and_save_results(base_dir)
+        result = fetch_and_save_results(base_dir, issue_date=issue_date)
     except Exception as exc:
         return False, f"更新比赛结果失败：{type(exc).__name__}"
 
@@ -161,15 +161,6 @@ st.title("📈 统计分析")
 ctx = get_data_context(ROOT)
 render_fetch_section(ROOT)
 
-if st.button("更新比赛结果", type="primary"):
-    with st.spinner("正在更新当前分析所需赛果..."):
-        ok, message = _run_daily_result_update(ROOT)
-    if ok:
-        st.success(message)
-        st.rerun()
-    else:
-        st.warning(message)
-
 match_df = load_all_matches(ctx)
 match_df = normalize_dataframe(match_df)
 match_df = ensure_issue_date_columns(match_df, source_col="issue_date")
@@ -202,6 +193,17 @@ with col3:
 
 filtered_matches = filter_by_time_and_league(match_df, time_mode, time_value, selected_league)
 filtered_preds = filter_by_time_and_league(pred_df, time_mode, time_value, selected_league)
+
+issue_date_for_update = time_value if time_mode == "按日" else None
+if st.button("更新比赛结果", type="primary"):
+    label = issue_date_for_update or "今日"
+    with st.spinner(f"正在更新 {label} 的比赛结果..."):
+        ok, message = _run_daily_result_update(ROOT, issue_date=issue_date_for_update)
+    if ok:
+        st.success(message)
+        st.rerun()
+    else:
+        st.warning(message)
 
 st.markdown("---")
 st.markdown("### 基础分析")

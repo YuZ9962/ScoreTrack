@@ -934,7 +934,8 @@ def _get_result_candidate_urls() -> list[str]:
     """延迟获取候选 URL 列表（避免模块加载时循环导入）。"""
     if not _RESULT_CANDIDATE_URLS:
         lottery_url = settings.lottery_result_url
-        urls = [lottery_url, ZQSGKJ_URL]
+        # sporttery.cn 首选（lottery.gov.cn 在某些网络环境下 SPA 无法加载）
+        urls = [ZQSGKJ_URL, lottery_url]
         # 去重保序
         seen: set[str] = set()
         result = []
