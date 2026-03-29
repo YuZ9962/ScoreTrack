@@ -484,6 +484,22 @@ def _wait_for_form_ready(page: Any, timeout_ms: int = 15000) -> bool:
         page.wait_for_selector("#sgkj_991", timeout=timeout_ms)
     except Exception:
         logger.warning("等待 #sgkj_991 超时，可能是SPA加载失败")
+        # 诊断：记录页面实际 URL 和关键容器，帮助排查结构差异
+        try:
+            actual_url = page.url
+            body_excerpt = page.evaluate(
+                "() => document.body ? document.body.innerHTML.slice(0, 800) : '(no body)'"
+            )
+            containers = page.evaluate(
+                "() => ['#sgkj_991','#matchList','.m-tab','.m-form'].map(s => "
+                "({sel:s, found:!!document.querySelector(s)}))"
+            )
+            logger.warning(
+                "SPA诊断 actual_url=%s containers=%s body_excerpt=%s",
+                actual_url, containers, body_excerpt,
+            )
+        except Exception as diag_exc:
+            logger.warning("SPA诊断失败 err=%s", diag_exc)
 
     # 再等待容器内的 input 元素
     for selector in ["#sgkj_991 input", "#sgkj_991 form", "input[id*='date']", "input[type='text']"]:
