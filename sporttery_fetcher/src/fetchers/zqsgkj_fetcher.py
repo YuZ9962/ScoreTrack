@@ -152,20 +152,8 @@ def _table_signature(page: Any, table_locator: Any | None = None) -> str:
 
 def _extract_current_page_no(page: Any) -> str:
     selectors = [
-        # 实际页面结构：li.u-pg3 > span（当前页，无 <a>）
         "li.u-pg3 span",
         "li.u-pg3",
-        # pagerN.js 当前页元素（备用）
-        ".p-cur",
-        "span.p-cur",
-        "a.p-cur",
-        # 其他常见分页库
-        ".pagination .active",
-        ".page .active",
-        ".pager .active",
-        "a.cur",
-        "span.cur",
-        "li.active",
     ]
     for selector in selectors:
         try:
@@ -181,17 +169,8 @@ def _extract_current_page_no(page: Any) -> str:
 
 def _extract_total_pages_hint(page: Any) -> int | None:
     selectors = [
-        # 实际页面结构：li.u-pg2 a（非当前页链接）、li.u-pg4 a（尾页链接）
         "li.u-pg2 a",
         "li.u-pg4 a",
-        # pagerN.js（备用）
-        ".p-span a",
-        ".p-span",
-        # 其他常见分页库
-        ".pagination a",
-        ".page a",
-        ".pager a",
-        "a[href*='page']",
     ]
     values: list[int] = []
     for selector in selectors:
@@ -780,24 +759,6 @@ def _find_next_button(page: Any) -> Any | None:
         except Exception:
             continue
 
-    # ── pagerN "下N页" 文字模式 ──
-    try:
-        all_a = page.locator("a")
-        count = all_a.count()
-        for i in range(count):
-            try:
-                loc = all_a.nth(i)
-                txt = loc.inner_text(timeout=300).strip()
-                if re.match(r"^下\d+页$", txt) and loc.is_visible():
-                    class_name = (loc.get_attribute("class") or "").lower()
-                    if "disabled" not in class_name:
-                        logger.info("pagerN 分页按钮识别到 text=%s", txt)
-                        return loc
-            except Exception:
-                continue
-    except Exception:
-        pass
-
     return None
 
 
@@ -848,27 +809,8 @@ def _click_pagern_next_via_js(page: Any) -> tuple[bool, int]:
 def _click_next_page(page: Any, previous_signature: str, before_first_match_no: str) -> tuple[bool, str, str]:
     next_btn = _find_next_button(page)
     if next_btn is None:
-        # 兜底：尝试 pagerN 数字页码模式
-        js_ok, next_page_no = _click_pagern_next_via_js(page)
-        if not js_ok:
-            logger.info("分页识别：未找到下一页控件（含pagerN数字兜底）")
-            return False, "", ""
-        logger.info("pagerN 数字翻页触发成功，目标页=%s", next_page_no)
-        # 等待页面内容更新
-        changed = False
-        after_signature = ""
-        for _ in range(12):
-            page.wait_for_timeout(600)
-            after_signature = _table_signature(page)
-            if after_signature and after_signature != previous_signature:
-                changed = True
-                break
-        page_rows_after, _ = _parse_current_page_rows(page, issue_date="")
-        after_first_match_no = _first_match_no(page_rows_after)
-        if not changed and after_first_match_no == before_first_match_no:
-            logger.warning("pagerN 数字翻页后内容未变化，停止翻页")
-            return False, after_first_match_no, after_signature
-        return True, after_first_match_no, after_signature
+        logger.info("分页识别：未找到下一页控件")
+        return False, "", ""
 
     logger.info("分页识别：找到下一页控件，准备点击")
     try:
@@ -985,11 +927,9 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
 
     start_date = issue_date
     end_date = (datetime.strptime(issue_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
-    target_prefix = _target_weekday_prefix(issue_date)
 
     logger.info("开始抓取历史赛果 issue_date=%s base_url=%s", issue_date, base_url)
     logger.info("查询日期范围 start_date=%s end_date=%s", start_date, end_date)
-    logger.info("target_weekday_prefix=%s", target_prefix)
 
     all_rows: list[dict[str, str]] = []
 
@@ -1145,48 +1085,14 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
 
     logger.info("全部分页合并后比赛行数=%s", len(all_rows))
 
-    prefix_set = sorted(
-        {
-            str(r.get("match_no", "") or "").strip()[:2]
-            for r in all_rows
-            if str(r.get("match_no", "") or "").strip()
-        }
-    )
-    has_target_prefix = any(str(r.get("match_no", "") or "").startswith(target_prefix) for r in all_rows)
-    if not has_target_prefix:
-        logger.warning(
-            "前缀不匹配，疑似未切换到目标日期：target_weekday_prefix=%s 当前抓取到的前缀集合=%s",
-            target_prefix,
-            prefix_set,
-        )
-
     deduped = _dedup_records(all_rows)
     logger.info("去重后比赛数=%s", len(deduped))
 
-    # 主过滤：match_no 的 weekday 前缀精确匹配
-    filtered = [r for r in deduped if str(r.get("match_no", "")).startswith(target_prefix)]
-    logger.info("weekday 前缀过滤后的比赛数=%s", len(filtered))
-
-    # 降级过滤：若 weekday 前缀匹配失败，改用 match_date 字段精确匹配 issue_date
-    # 场景：表单日期填写失败但 URL 兜底也未成功，或者同批次数据里混有目标日期记录
+    filtered = [r for r in deduped if str(r.get("match_date", "")).strip() == issue_date]
+    logger.info("match_date=%s 精确过滤后比赛数=%s", issue_date, len(filtered))
     if not filtered:
-        date_filtered = [r for r in deduped if str(r.get("match_date", "")).strip() == issue_date]
-        if date_filtered:
-            logger.info(
-                "weekday前缀匹配0条，降级使用 match_date=%s 精确过滤，命中 %s 条",
-                issue_date,
-                len(date_filtered),
-            )
-            filtered = date_filtered
-        else:
-            logger.warning(
-                "weekday前缀与match_date两级过滤均为0，可能原因：(1)表单日期设置失败且URL兜底无效 "
-                "(2) %s 确实无竞彩足球赛事。prefix_set=%s",
-                issue_date,
-                prefix_set,
-            )
+        logger.info("日期 %s 无可用赛果（可能当日无竞彩足球赛事）", issue_date)
 
-    logger.info("最终返回比赛数=%s", len(filtered))
     return filtered
 
 
