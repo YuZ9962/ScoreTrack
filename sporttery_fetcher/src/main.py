@@ -27,28 +27,7 @@ def _triple_non_empty_count(records: list[dict[str, Any]], keys: tuple[str, str,
 def run(issue_date: str) -> dict[str, Any]:
     logger.info("开始抓取竞彩足球数据，日期=%s", issue_date)
 
-    # 历史赛果主流程：优先使用官方 zqsgkj 开奖页
-    try:
-        zqsgkj_records = fetch_zqsgkj_matches(issue_date)
-    except Exception as exc:
-        logger.warning("zqsgkj 历史赛果抓取失败，回退比赛抓取流程 err=%s", type(exc).__name__)
-        zqsgkj_records = []
-
-    if zqsgkj_records:
-        json_path, csv_path = save_zqsgkj_results(issue_date, zqsgkj_records, settings.base_dir)
-        logger.info("zqsgkj 历史赛果抓取成功 count=%s json=%s csv=%s", len(zqsgkj_records), json_path, csv_path)
-        return {
-            "count": len(zqsgkj_records),
-            "strategy": "zqsgkj_playwright",
-            "handicap_non_empty": sum(1 for r in zqsgkj_records if str(r.get("handicap", "")).strip()),
-            "spf_full_non_empty": _triple_non_empty_count(zqsgkj_records, ("spf_win", "spf_draw", "spf_lose")),
-            "rqspf_full_non_empty": 0,
-            "json_path": str(json_path),
-            "csv_path": str(csv_path),
-            "source_url": "https://www.sporttery.cn/jc/zqsgkj/",
-        }
-
-    # 未开始赛程：lottery.gov.cn/jc/zqszsc
+    # 1. 未开始赛程：lottery.gov.cn/jc/zqszsc（侧边栏主流程）
     try:
         lottery_rows = fetch_lottery_schedule(issue_date)
     except Exception as exc:
@@ -72,6 +51,27 @@ def run(issue_date: str) -> dict[str, Any]:
             "json_path": str(json_path),
             "csv_path": str(csv_path),
             "source_url": settings.lottery_schedule_url,
+        }
+
+    # 2. 历史赛果：sporttery.cn/jc/zqsgkj（日期已过、无赛程时降级）
+    try:
+        zqsgkj_records = fetch_zqsgkj_matches(issue_date)
+    except Exception as exc:
+        logger.warning("zqsgkj 历史赛果抓取失败，回退比赛抓取流程 err=%s", type(exc).__name__)
+        zqsgkj_records = []
+
+    if zqsgkj_records:
+        json_path, csv_path = save_zqsgkj_results(issue_date, zqsgkj_records, settings.base_dir)
+        logger.info("zqsgkj 历史赛果抓取成功 count=%s json=%s csv=%s", len(zqsgkj_records), json_path, csv_path)
+        return {
+            "count": len(zqsgkj_records),
+            "strategy": "zqsgkj_playwright",
+            "handicap_non_empty": sum(1 for r in zqsgkj_records if str(r.get("handicap", "")).strip()),
+            "spf_full_non_empty": _triple_non_empty_count(zqsgkj_records, ("spf_win", "spf_draw", "spf_lose")),
+            "rqspf_full_non_empty": 0,
+            "json_path": str(json_path),
+            "csv_path": str(csv_path),
+            "source_url": "https://www.sporttery.cn/jc/zqsgkj/",
         }
 
     logger.info("当前主页面: %s", settings.primary_page_url)
