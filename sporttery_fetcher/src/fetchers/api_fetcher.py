@@ -5,6 +5,7 @@ from typing import Any
 
 from config.settings import settings
 from src.utils.http import HTTPClient
+from src.domain.match_time import derive_match_date, infer_issue_date_from_kickoff
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -49,8 +50,6 @@ class APIFetcher:
             if not isinstance(day_bucket, dict):
                 continue
             business_date = self._str_or_none(day_bucket.get("businessDate"))
-            if issue_date and business_date and business_date != issue_date:
-                continue
 
             sub_list = day_bucket.get("subMatchList") or []
             for item in sub_list:
@@ -88,13 +87,19 @@ class APIFetcher:
                 sell_status_raw = item.get("sellStatus")
                 sell_status = self._normalize_sell_status(match_status, sell_status_raw)
 
-                # match_date = 实际比赛日期（从 matchDate 字段或 kickoff_time 前10字符提取）
-                # 注意：issue_date(business_date) = 销售日，与 match_date 可能不同
-                resolved_match_date = match_date or (kickoff_time[:10] if kickoff_time and len(kickoff_time) >= 10 else None)
+                inferred_issue_date = infer_issue_date_from_kickoff(kickoff_time)
+                resolved_issue_date = business_date or inferred_issue_date or issue_date
+                if issue_date and resolved_issue_date and resolved_issue_date != issue_date:
+                    continue
+
+                # match_date = 实际比赛自然日
+                resolved_match_date = match_date or derive_match_date(kickoff_time)
 
                 out.append(
                     {
-                        "issue_date": business_date or issue_date,
+                        "issue_date": resolved_issue_date,
+                        "issue_date_inferred": inferred_issue_date,
+                        "issue_date_source": "businessDate" if business_date else ("inferred" if inferred_issue_date else "request"),
                         "match_date": resolved_match_date,
                         "match_no": self._str_or_none(item.get("matchNumStr")),
                         "league": self._str_or_none(item.get("leagueAllName")) or self._str_or_none(item.get("leagueAbbName")),
