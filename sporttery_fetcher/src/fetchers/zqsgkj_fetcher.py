@@ -917,8 +917,15 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
             logger.info("尝试抓取赛果 url=%s issue_date=%s", url, issue_date)
             rows = _fetch_zqsgkj_from_url(issue_date, url)
             if rows:
-                logger.info("赛果抓取成功 url=%s count=%s", url, len(rows))
-                return rows
+                final_rows, dropped = _filter_rows_by_issue_window_and_match_no(issue_date, rows)
+                logger.info(
+                    "赛果抓取成功 url=%s raw_count=%s final_count=%s dropped_after_top_filter=%s",
+                    url,
+                    len(rows),
+                    len(final_rows),
+                    dropped,
+                )
+                return final_rows
             logger.info("赛果抓取返回0条 url=%s，尝试下一个候选", url)
         except Exception as exc:
             logger.warning("赛果抓取异常 url=%s err=%s，尝试下一个候选", url, type(exc).__name__)
