@@ -1092,30 +1092,12 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
     deduped = _dedup_records(all_rows)
     logger.info("去重后比赛数=%s", len(deduped))
 
-    # issue_date 销售窗口覆盖两个自然日（D 与 D+1）。
-    # 历史赛果页缺少 kickoff_time 时无法精确切分到 11:00 边界：
-    # - 保留 D / D+1 的记录（避免误删跨日凌晨场次）
-    # - 超出窗口自然日的数据剔除（避免串期）
-    from datetime import date as _date, timedelta as _timedelta
-    try:
-        base_d = _date.fromisoformat(issue_date)
-        allow_dates = {base_d.isoformat(), (base_d + _timedelta(days=1)).isoformat()}
-    except ValueError:
-        allow_dates = {issue_date}
-
-    filtered: list[dict[str, str]] = []
-    dropped = 0
-    for r in deduped:
-        md = str(r.get("match_date") or "").strip()
-        if not md or md in allow_dates:
-            filtered.append(r)
-        else:
-            dropped += 1
-
+    filtered, dropped = _filter_rows_by_issue_window_and_match_no(issue_date, deduped)
+    weekday_prefix = _target_weekday_prefix(issue_date)
     logger.info(
-        "issue_date窗口近似过滤 issue_date=%s allow_dates=%s before=%s after=%s dropped=%s",
+        "issue_date窗口+match_no过滤 issue_date=%s weekday_prefix=%s before=%s after=%s dropped=%s",
         issue_date,
-        sorted(allow_dates),
+        weekday_prefix,
         len(deduped),
         len(filtered),
         dropped,
@@ -1125,6 +1107,42 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
 
     return deduped
 
+
+
+def _filter_rows_by_issue_window_and_match_no(issue_date: str, rows: list[dict[str, str]]) -> tuple[list[dict[str, str]], int]:
+    """按 issue_date 过滤历史赛果：
+
+    1) 自然日只保留 D / D+1（销售窗口覆盖日）
+    2) 优先使用 match_no 的星期前缀定位销售日归属（如 issue_date=周一，则保留 周一xxx）
+    """
+    from datetime import date as _date, timedelta as _timedelta
+
+    try:
+        base_d = _date.fromisoformat(issue_date)
+        allow_dates = {base_d.isoformat(), (base_d + _timedelta(days=1)).isoformat()}
+    except ValueError:
+        allow_dates = {issue_date}
+
+    weekday_prefix = _target_weekday_prefix(issue_date)
+    out: list[dict[str, str]] = []
+    dropped = 0
+
+    for r in rows:
+        md = str(r.get("match_date") or "").strip()
+        mn = str(r.get("match_no") or "").strip()
+
+        if md and md not in allow_dates:
+            dropped += 1
+            continue
+
+        # match_no 能识别时，按 issue_date 的星期前缀做强约束
+        if weekday_prefix and mn and not mn.startswith(weekday_prefix):
+            dropped += 1
+            continue
+
+        out.append(r)
+
+    return out, dropped
 
 def save_zqsgkj_results(issue_date: str, records: list[dict[str, str]], base_dir: Path | None = None) -> tuple[Path, Path]:
     root = base_dir or settings.base_dir
