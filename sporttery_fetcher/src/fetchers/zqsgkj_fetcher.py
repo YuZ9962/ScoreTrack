@@ -115,12 +115,10 @@ def _row_to_record(issue_date: str, cols: list[str]) -> dict[str, str]:
     scrape_time = datetime.utcnow().isoformat()
 
     match_date = cols[0]
-    inferred_issue_date = infer_issue_date_from_kickoff(f"{match_date} 12:00") if match_date else None
-
     return {
         "issue_date": issue_date,
-        "issue_date_inferred": inferred_issue_date,
-        "issue_date_source": "query_param",
+        "issue_date_inferred": None,
+        "issue_date_source": "query_window_no_kickoff",
         "match_date": match_date,
         "match_no": cols[1],
         "league": cols[2],
@@ -1094,10 +1092,35 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
     deduped = _dedup_records(all_rows)
     logger.info("去重后比赛数=%s", len(deduped))
 
-    # 赛果页已通过 issue_date 查询，这里不再按自然日(match_date)二次硬过滤，避免跨日误丢。
-    # 特别是次日凌晨/上午场次依然属于前一销售日窗口，必须保留。
-    logger.info("按 issue_date 查询后直接保留去重结果 issue_date=%s rows=%s", issue_date, len(deduped))
-    if not deduped:
+    # issue_date 销售窗口覆盖两个自然日（D 与 D+1）。
+    # 历史赛果页缺少 kickoff_time 时无法精确切分到 11:00 边界：
+    # - 保留 D / D+1 的记录（避免误删跨日凌晨场次）
+    # - 超出窗口自然日的数据剔除（避免串期）
+    from datetime import date as _date, timedelta as _timedelta
+    try:
+        base_d = _date.fromisoformat(issue_date)
+        allow_dates = {base_d.isoformat(), (base_d + _timedelta(days=1)).isoformat()}
+    except ValueError:
+        allow_dates = {issue_date}
+
+    filtered: list[dict[str, str]] = []
+    dropped = 0
+    for r in deduped:
+        md = str(r.get("match_date") or "").strip()
+        if not md or md in allow_dates:
+            filtered.append(r)
+        else:
+            dropped += 1
+
+    logger.info(
+        "issue_date窗口近似过滤 issue_date=%s allow_dates=%s before=%s after=%s dropped=%s",
+        issue_date,
+        sorted(allow_dates),
+        len(deduped),
+        len(filtered),
+        dropped,
+    )
+    if not filtered:
         logger.info("日期 %s 无可用赛果（可能当日无竞彩足球赛事）", issue_date)
 
     return deduped
