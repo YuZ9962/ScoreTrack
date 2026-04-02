@@ -15,7 +15,13 @@ if str(ROOT) not in sys.path:
 
 from components.charts import render_semantic_probability_pie
 from components.data_controls import render_fetch_section
-from services.loader import get_data_context, load_all_matches, load_chatgpt_predictions, load_results
+from services.loader import (
+    get_data_context,
+    get_or_rebuild_match_facts,
+    load_all_matches,
+    load_chatgpt_predictions,
+    load_results,
+)
 from services.prediction_store import load_predictions
 from services.result_evaluator import build_hit_summary, evaluate_chatgpt_predictions, evaluate_predictions
 from services.transforms import (
@@ -28,8 +34,6 @@ from src.fetchers.result_fetcher import fetch_and_save_results
 from utils.formatting import semantic_match_labels
 
 TIME_MODES = ["按日", "按月", "按年"]
-
-
 
 
 def _run_daily_result_update(base_dir: Path, issue_date: str | None = None) -> tuple[bool, str]:
@@ -57,6 +61,7 @@ def _run_daily_result_update(base_dir: Path, issue_date: str | None = None) -> t
     )
     return True, msg
 
+
 def _time_options(df: pd.DataFrame, mode: str) -> list[str]:
     col_map = {"按日": "_date", "按月": "_month", "按年": "_year"}
     col = col_map[mode]
@@ -65,21 +70,17 @@ def _time_options(df: pd.DataFrame, mode: str) -> list[str]:
     return sorted([str(v) for v in df[col].dropna().unique().tolist() if str(v).strip()])
 
 
-
 def _collect_leagues(match_df: pd.DataFrame, pred_df: pd.DataFrame) -> list[str]:
     series_list = []
     if "league" in match_df.columns:
         series_list.append(match_df["league"].fillna("").astype(str))
     if "league" in pred_df.columns:
         series_list.append(pred_df["league"].fillna("").astype(str))
-
     if not series_list:
         return ["全部联赛"]
-
     merged = pd.concat(series_list, ignore_index=True)
     leagues = sorted([x for x in merged.unique().tolist() if x.strip()])
     return ["全部联赛", *leagues]
-
 
 
 def _normalize_pick_text(value: object) -> str:
@@ -99,14 +100,12 @@ def _join_main_secondary(main_pick: object, secondary_pick: object) -> str:
     return f"{main}/{secondary}"
 
 
-
 def _join_scores(score_1: object, score_2: object) -> str:
     s1 = str(score_1 or "").strip()
     s2 = str(score_2 or "").strip()
     if s1 and s2:
         return f"{s1}/{s2}"
     return s1 or s2
-
 
 
 def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -123,10 +122,10 @@ def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: _join_main_secondary(r.get("gemini_handicap_main_pick"), r.get("gemini_handicap_secondary_pick")), axis=1
     )
     out["推荐比分"] = out.apply(lambda r: _join_scores(r.get("gemini_score_1"), r.get("gemini_score_2")), axis=1)
-    out["比赛实际比分"] = out.get("final_score")
-    out["胜平负预测结果"] = out.get("match_hit_result")
-    out["让胜平负预测结果"] = out.get("handicap_hit_result")
-    out["数据来源"] = out.get("data_source").fillna("auto")
+    out["比赛实际比分"] = out.get("full_time_score")
+    out["胜平负预测结果"] = out.get("gemini_match_hit") if "gemini_match_hit" in out.columns else out.get("match_hit_result")
+    out["让胜平负预测结果"] = out.get("gemini_handicap_hit") if "gemini_handicap_hit" in out.columns else out.get("handicap_hit_result")
+    out["数据来源"] = out.get("data_source", pd.Series(["auto"] * len(out))).fillna("auto")
 
     return out[
         [
@@ -155,17 +154,55 @@ def _status_icon(value: object) -> str:
     return "⏳"
 
 
+def _hit_summary_from_facts(df: pd.DataFrame, match_col: str, handicap_col: str) -> dict:
+    """从事实表字段直接计算命中统计，复用 build_hit_summary 格式。"""
+    total = len(df)
+    match_ended = int((df[match_col] != "未开奖").sum()) if match_col in df.columns else 0
+    handicap_ended = int((df[handicap_col] != "未开奖").sum()) if handicap_col in df.columns else 0
+    match_hit = int((df.get(match_col, pd.Series([], dtype="string")) == "命中").sum())
+    handicap_hit = int((df.get(handicap_col, pd.Series([], dtype="string")) == "命中").sum())
+
+    match_rate = (
+        f"{match_hit} / {match_ended}（{(match_hit / match_ended) * 100:.1f}%）"
+        if match_ended > 0 else "0 / 0（0.0%）"
+    )
+    handicap_rate = (
+        f"{handicap_hit} / {handicap_ended}（{(handicap_hit / handicap_ended) * 100:.1f}%）"
+        if handicap_ended > 0 else "0 / 0（0.0%）"
+    )
+    return {"total": total, "ended": match_ended, "match_rate": match_rate, "handicap_rate": handicap_rate}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 页面入口
+# ─────────────────────────────────────────────────────────────────────────────
+
 st.set_page_config(page_title="统计分析", page_icon="📈", layout="wide")
 st.title("📈 统计分析")
 
 ctx = get_data_context(ROOT)
 render_fetch_section(ROOT)
 
-match_df = load_all_matches(ctx)
+# ── 优先加载事实表 ──────────────────────────────────────────────────────────
+facts_df = get_or_rebuild_match_facts(ROOT)
+use_facts = not facts_df.empty
+
+if use_facts:
+    facts_df = ensure_issue_date_columns(facts_df, source_col="issue_date")
+    st.caption("✅ 正在使用统一事实表（match_facts.csv）")
+else:
+    st.caption("⚠️ 事实表为空，回退旧数据路径")
+
+# ── 回退路径（事实表不可用时）──────────────────────────────────────────────
+match_df = load_all_matches(ctx) if not use_facts else facts_df
 match_df = normalize_dataframe(match_df)
 match_df = ensure_issue_date_columns(match_df, source_col="issue_date")
 
-pred_df = load_predictions(ROOT)
+pred_df = (
+    facts_df[facts_df["gemini_prediction_status"].notna() & (facts_df["gemini_prediction_status"] != "")]
+    if use_facts
+    else load_predictions(ROOT)
+)
 pred_df = ensure_issue_date_columns(pred_df, source_col="issue_date")
 
 if match_df.empty and pred_df.empty:
@@ -192,7 +229,6 @@ with col3:
     selected_league = st.selectbox("联赛筛选", options=league_options, index=0)
 
 filtered_matches = filter_by_time_and_league(match_df, time_mode, time_value, selected_league)
-filtered_preds = filter_by_time_and_league(pred_df, time_mode, time_value, selected_league)
 
 issue_date_for_update = time_value if time_mode == "按日" else None
 if st.button("更新比赛结果", type="primary"):
@@ -211,92 +247,114 @@ metric_col1, metric_col2 = st.columns(2)
 
 label_map = {"按日": "每日比赛数", "按月": "每月比赛总数", "按年": "每年比赛总数"}
 metric_col1.metric(label_map[time_mode], len(filtered_matches))
-
 league_label = "全部联赛比赛数" if selected_league == "全部联赛" else f"{selected_league} 比赛数"
 metric_col2.metric(league_label, len(filtered_matches))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gemini 推荐分析
+# ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown("---")
 st.markdown("### Gemini 推荐分析")
 st.caption("包含自动抓取与手动补录（data_source=manual）的 Gemini 预测数据")
 
+if use_facts:
+    # 从事实表筛出有 Gemini 预测的行
+    filtered_preds = filter_by_time_and_league(
+        facts_df[
+            facts_df["gemini_prediction_status"].notna()
+            & (facts_df["gemini_prediction_status"].astype(str).str.strip() != "")
+        ].copy(),
+        time_mode, time_value, selected_league,
+    )
+else:
+    filtered_preds = filter_by_time_and_league(pred_df, time_mode, time_value, selected_league)
+
 if filtered_preds.empty:
     st.info("当前筛选条件下暂无 Gemini 推荐数据。")
-    st.stop()
+else:
+    if use_facts:
+        # 直接用事实表命中字段
+        summary = _hit_summary_from_facts(filtered_preds, "gemini_match_hit", "gemini_handicap_hit")
+        eval_df = filtered_preds.copy()
+        # 将事实表命中列映射到 display 列名
+        eval_df["match_hit_result"] = eval_df.get("gemini_match_hit")
+        eval_df["handicap_hit_result"] = eval_df.get("gemini_handicap_hit")
+        eval_df["final_score"] = eval_df.get("full_time_score")
+    else:
+        results_df = load_results(ROOT)
+        eval_df = evaluate_predictions(filtered_preds, results_df)
+        summary = build_hit_summary(eval_df)
 
-results_df = load_results(ROOT)
-eval_df = evaluate_predictions(filtered_preds, results_df)
-summary = build_hit_summary(eval_df)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("推荐总场次", summary["total"])
+    m2.metric("已结束场次", summary["ended"])
+    m3.metric("胜平负预测命中率", summary["match_rate"])
+    m4.metric("让胜平负预测命中率", summary["handicap_rate"])
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("推荐总场次", summary["total"])
-m2.metric("已结束场次", summary["ended"])
-m3.metric("胜平负预测命中率", summary["match_rate"])
-m4.metric("让胜平负预测命中率", summary["handicap_rate"])
+    show_cols = [
+        "match_no", "league", "home_team", "away_team", "kickoff_time", "handicap",
+        "gemini_match_main_pick", "gemini_match_secondary_pick",
+        "gemini_handicap_main_pick", "gemini_handicap_secondary_pick",
+        "gemini_score_1", "gemini_score_2",
+        "final_score", "match_hit_result", "handicap_hit_result", "data_source",
+    ]
+    for col in show_cols:
+        if col not in eval_df.columns:
+            eval_df[col] = None
 
-show_cols = [
-    "match_no",
-    "league",
-    "home_team",
-    "away_team",
-    "kickoff_time",
-    "handicap",
-    "gemini_match_main_pick",
-    "gemini_match_secondary_pick",
-    "gemini_handicap_main_pick",
-    "gemini_handicap_secondary_pick",
-    "gemini_score_1",
-    "gemini_score_2",
-    "final_score",
-    "match_hit_result",
-    "handicap_hit_result",
-    "data_source",
-]
+    sorted_df = sort_by_match_no(eval_df[show_cols].copy())
+    display_df = _build_cn_table(sorted_df)
+    display_df["胜平负预测结果"] = display_df["胜平负预测结果"].map(_status_icon)
+    display_df["让胜平负预测结果"] = display_df["让胜平负预测结果"].map(_status_icon)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-for col in show_cols:
-    if col not in eval_df.columns:
-        eval_df[col] = None
-
-sorted_df = sort_by_match_no(eval_df[show_cols].copy())
-display_df = _build_cn_table(sorted_df)
-display_df["胜平负预测结果"] = display_df["胜平负预测结果"].map(_status_icon)
-display_df["让胜平负预测结果"] = display_df["让胜平负预测结果"].map(_status_icon)
-st.dataframe(display_df, use_container_width=True, hide_index=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# ChatGPT 概率预测分析
+# ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown("---")
 st.markdown("### ChatGPT 概率预测分析")
-chatgpt_df = load_chatgpt_predictions(ROOT)
-chatgpt_df = ensure_issue_date_columns(chatgpt_df, source_col="issue_date")
-filtered_chatgpt = filter_by_time_and_league(chatgpt_df, time_mode, time_value, selected_league)
 
-chatgpt_eval_df = evaluate_chatgpt_predictions(filtered_chatgpt, results_df)
-chatgpt_summary = build_hit_summary(chatgpt_eval_df)
+if use_facts:
+    chatgpt_filtered = filter_by_time_and_league(
+        facts_df[
+            facts_df["chatgpt_prediction_status"].astype(str).str.strip() == "present"
+        ].copy(),
+        time_mode, time_value, selected_league,
+    )
+    if not chatgpt_filtered.empty:
+        chatgpt_filtered = ensure_issue_date_columns(chatgpt_filtered, source_col="issue_date")
+    chatgpt_eval_df = chatgpt_filtered.copy()
+    if not chatgpt_eval_df.empty:
+        chatgpt_eval_df["match_hit_result"] = chatgpt_eval_df.get("chatgpt_match_hit")
+        chatgpt_eval_df["handicap_hit_result"] = chatgpt_eval_df.get("chatgpt_handicap_hit")
+        chatgpt_eval_df["final_score"] = chatgpt_eval_df.get("full_time_score")
+    chatgpt_summary = _hit_summary_from_facts(chatgpt_eval_df, "chatgpt_match_hit", "chatgpt_handicap_hit")
+else:
+    chatgpt_df = load_chatgpt_predictions(ROOT)
+    chatgpt_df = ensure_issue_date_columns(chatgpt_df, source_col="issue_date")
+    chatgpt_filtered = filter_by_time_and_league(chatgpt_df, time_mode, time_value, selected_league)
+    results_df = load_results(ROOT)
+    chatgpt_eval_df = evaluate_chatgpt_predictions(chatgpt_filtered, results_df)
+    chatgpt_summary = build_hit_summary(chatgpt_eval_df)
 
 g1, g2, g3, g4 = st.columns(4)
 g1.metric("推荐总场次", chatgpt_summary["total"])
 g2.metric("已结束场次", chatgpt_summary["ended"])
 g3.metric("胜平负预测命中率", chatgpt_summary["match_rate"])
 g4.metric("让胜平负预测命中率", chatgpt_summary["handicap_rate"])
+
 if chatgpt_eval_df.empty:
     st.info("当前筛选条件下暂无 ChatGPT 概率预测数据。")
 else:
     for c in [
-        "kickoff_time",
-        "match_no",
-        "league",
-        "home_team",
-        "away_team",
-        "handicap",
-        "chatgpt_home_win_prob",
-        "chatgpt_draw_prob",
-        "chatgpt_away_win_prob",
-        "chatgpt_handicap_win_prob",
-        "chatgpt_handicap_draw_prob",
-        "chatgpt_handicap_lose_prob",
-        "chatgpt_score_1",
-        "chatgpt_score_2",
-        "chatgpt_score_3",
-        "chatgpt_top_direction",
-        "chatgpt_upset_probability_text",
+        "kickoff_time", "match_no", "league", "home_team", "away_team", "handicap",
+        "chatgpt_home_win_prob", "chatgpt_draw_prob", "chatgpt_away_win_prob",
+        "chatgpt_handicap_win_prob", "chatgpt_handicap_draw_prob", "chatgpt_handicap_lose_prob",
+        "chatgpt_score_1", "chatgpt_score_2", "chatgpt_score_3",
+        "chatgpt_top_direction", "chatgpt_upset_probability_text",
+        "match_hit_result", "handicap_hit_result", "final_score",
     ]:
         if c not in chatgpt_eval_df.columns:
             chatgpt_eval_df[c] = None
@@ -315,10 +373,8 @@ else:
     )
     cdf["推荐比分"] = (
         cdf["chatgpt_score_1"].fillna("").astype(str)
-        + "/"
-        + cdf["chatgpt_score_2"].fillna("").astype(str)
-        + "/"
-        + cdf["chatgpt_score_3"].fillna("").astype(str)
+        + "/" + cdf["chatgpt_score_2"].fillna("").astype(str)
+        + "/" + cdf["chatgpt_score_3"].fillna("").astype(str)
     ).str.strip("/")
     cdf["概率"] = cdf.apply(
         lambda r: f"主{r.get('chatgpt_home_win_prob')}% | 平{r.get('chatgpt_draw_prob')}% | 客{r.get('chatgpt_away_win_prob')}%",
@@ -330,35 +386,20 @@ else:
 
     cdf = sort_by_match_no(cdf)
     st.dataframe(
-        cdf[
-            [
-                "日期时间",
-                "比赛序号",
-                "联赛",
-                "主客队",
-                "让球",
-                "胜平负",
-                "让胜平负",
-                "推荐比分",
-                "概率",
-                "比赛实际比分",
-                "胜平负预测结果",
-                "让胜平负预测结果",
-            ]
-        ],
+        cdf[[
+            "日期时间", "比赛序号", "联赛", "主客队", "让球",
+            "胜平负", "让胜平负", "推荐比分", "概率",
+            "比赛实际比分", "胜平负预测结果", "让胜平负预测结果",
+        ]],
         use_container_width=True,
         hide_index=True,
     )
 
     st.markdown("#### 单场比赛概率分布")
-    single_options = []
-    for idx, r in cdf.iterrows():
-        single_options.append(
-            (
-                idx,
-                f"{r.get('match_no', '-') } | {r.get('league', '-') } | {r.get('home_team', '-') } vs {r.get('away_team', '-')}",
-            )
-        )
+    single_options = [
+        (idx, f"{r.get('match_no', '-')} | {r.get('league', '-')} | {r.get('home_team', '-')} vs {r.get('away_team', '-')}")
+        for idx, r in cdf.iterrows()
+    ]
     selected_single_idx = st.selectbox(
         "选择比赛（用于下方两个饼图）",
         options=[x[0] for x in single_options],
@@ -389,7 +430,6 @@ else:
             values=[0 if pd.isna(v) else float(v) for v in match_values],
             semantic_keys=["home", "draw", "away"],
         )
-
     with pie_col2:
         render_semantic_probability_pie(
             title="让胜平负概率分布（单场）",

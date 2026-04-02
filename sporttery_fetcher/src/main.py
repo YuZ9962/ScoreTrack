@@ -16,6 +16,16 @@ from src.parsers.normalize import normalize_matches
 from src.utils.logger import get_logger
 from src.utils.save import save_csv, save_json
 
+
+def _try_rebuild_facts(base_dir: Any = None) -> None:
+    """抓取完成后触发事实表重建（失败不影响主流程）。"""
+    try:
+        from src.services.match_fact_builder import rebuild_match_facts
+        from pathlib import Path
+        rebuild_match_facts(Path(base_dir) if base_dir else None)
+    except Exception:
+        logger.debug("facts rebuild skipped after fetch")
+
 logger = get_logger(__name__)
 
 
@@ -42,6 +52,7 @@ def run(issue_date: str) -> dict[str, Any]:
         json_path = save_json(normalized, issue_date)
         csv_path = save_csv(normalized, issue_date)
         logger.info("lottery 赛程抓取成功 count=%s json=%s csv=%s", len(normalized), json_path, csv_path)
+        _try_rebuild_facts(settings.base_dir)
         return {
             "count": len(normalized),
             "strategy": "lottery_schedule",
@@ -63,6 +74,7 @@ def run(issue_date: str) -> dict[str, Any]:
     if zqsgkj_records:
         json_path, csv_path = save_zqsgkj_results(issue_date, zqsgkj_records, settings.base_dir)
         logger.info("zqsgkj 历史赛果抓取成功 count=%s json=%s csv=%s", len(zqsgkj_records), json_path, csv_path)
+        _try_rebuild_facts(settings.base_dir)
         return {
             "count": len(zqsgkj_records),
             "strategy": "zqsgkj_playwright",
@@ -124,6 +136,7 @@ def run(issue_date: str) -> dict[str, Any]:
     )
     logger.info("JSON 输出: %s", json_path)
     logger.info("CSV 输出: %s", csv_path)
+    _try_rebuild_facts(settings.base_dir)
 
     return {
         "count": len(normalized),

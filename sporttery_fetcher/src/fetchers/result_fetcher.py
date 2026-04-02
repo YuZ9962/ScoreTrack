@@ -699,6 +699,13 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
         path,
     )
 
+    # 赛果保存成功后重建事实表
+    try:
+        from src.services.match_fact_builder import rebuild_match_facts
+        rebuild_match_facts(root)
+    except Exception:
+        logger.debug("facts rebuild skipped after result save")
+
     return {
         "ok": True,
         "path": str(path),

@@ -20,7 +20,7 @@ from services.chatgpt_runner import run_chatgpt_prediction
 from services.chatgpt_store import delete_chatgpt_predictions, load_chatgpt_predictions, save_chatgpt_prediction
 from services.gemini_parser import parse_gemini_output, parse_manual_raw_text
 from services.gemini_runner import run_gemini_prediction
-from services.loader import get_data_context, load_matches_by_date
+from services.loader import get_data_context, load_match_facts_by_date, load_matches_by_date
 from services.prediction_store import delete_predictions, load_predictions, save_prediction
 from services.transforms import normalize_dataframe, sort_by_match_no
 from utils.chatgpt_prompt_builder import build_chatgpt_probability_prompt
@@ -117,6 +117,22 @@ def _is_pending_or_failed(pred_row: pd.Series | None) -> bool:
     if pred_row is None:
         return True
     return str(pred_row.get("prediction_status", "")) in {"", STATUS_FAILED, STATUS_PENDING}
+
+
+def _get_fact_row(facts_df: pd.DataFrame, match_key_val: str) -> pd.Series | None:
+    """从事实表按 match_key 查找对应行（优先路径）。"""
+    if facts_df.empty or not match_key_val or "match_key" not in facts_df.columns:
+        return None
+    m = facts_df[facts_df["match_key"].astype(str) == match_key_val]
+    return m.iloc[-1] if not m.empty else None
+
+
+def _fact_gemini_status(fact_row: pd.Series | None) -> str | None:
+    """从事实表行提取 Gemini 预测状态（None 表示未找到）。"""
+    if fact_row is None:
+        return None
+    status = str(fact_row.get("gemini_prediction_status") or "").strip()
+    return status if status else None
 
 
 def _predict_single_chatgpt(match: pd.Series, issue_date: str) -> dict[str, object]:
@@ -430,8 +446,18 @@ selected_match = filtered_df.iloc[int(selected_index)]
 pred_df = load_predictions(ROOT)
 only_missing = st.checkbox("仅预测尚未生成 Gemini 结果的比赛", value=False)
 
+# 优先从事实表取当前场次状态（保证与 Analytics 看到的是同一套数据）
+_facts_for_date = load_match_facts_by_date(selected_date, ROOT)
+_match_key_val = str(selected_match.get("match_key") or build_match_key(selected_match.to_dict())).strip()
+_fact_row = _get_fact_row(_facts_for_date, _match_key_val)
+_fact_status = _fact_gemini_status(_fact_row)
+
 single_pred = _get_prediction_row(pred_df, selected_date, selected_match)
-st.info(f"当前场次状态：{_status_text(single_pred)}")
+# 当 facts 有状态时优先展示，否则降级到旧逻辑
+if _fact_status:
+    st.info(f"当前场次状态（facts）：{_fact_status}")
+else:
+    st.info(f"当前场次状态：{_status_text(single_pred)}")
 
 st.markdown("---")
 col_a, col_b, col_c, col_d = st.columns(4)

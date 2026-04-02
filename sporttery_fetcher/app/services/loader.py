@@ -7,6 +7,11 @@ import pandas as pd
 from services.chatgpt_store import load_chatgpt_predictions as _load_chatgpt_predictions
 from services.prediction_store import load_predictions as _load_predictions
 from src.services.result_cleaner import load_clean_results
+from src.services.match_fact_builder import (
+    load_match_facts as _load_facts,
+    rebuild_match_facts as _rebuild_facts,
+    FACT_COLUMNS,
+)
 
 
 @dataclass
@@ -145,3 +150,32 @@ def load_gemini_predictions_by_date(date_str: str, base_dir: Path | None = None)
     if "issue_date" not in gemini_df.columns:
         return pd.DataFrame()
     return gemini_df[gemini_df["issue_date"].astype(str) == str(date_str)].copy()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 事实表接口（统一消费层）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def load_match_facts(base_dir: Path | None = None) -> pd.DataFrame:
+    """读取已建好的事实表。不存在时返回空 DataFrame（不触发重建）。"""
+    return _load_facts(base_dir)
+
+
+def load_match_facts_by_date(date_str: str, base_dir: Path | None = None) -> pd.DataFrame:
+    """按 issue_date 筛选事实表。"""
+    df = _load_facts(base_dir)
+    if df.empty or "issue_date" not in df.columns:
+        return pd.DataFrame(columns=FACT_COLUMNS)
+    return df[df["issue_date"].astype(str) == str(date_str)].copy()
+
+
+def get_or_rebuild_match_facts(base_dir: Path | None = None) -> pd.DataFrame:
+    """
+    读取事实表；若不存在则触发一次全量重建后返回。
+    适合页面启动时调用。重建失败则返回空表（不中断流程）。
+    """
+    df = _load_facts(base_dir)
+    if not df.empty:
+        return df
+    _rebuild_facts(base_dir)
+    return _load_facts(base_dir)

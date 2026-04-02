@@ -8,6 +8,17 @@ import pandas as pd
 
 from utils.common import csv_lock, sales_day_key
 
+
+def _try_rebuild_facts(base_dir: Path | None) -> None:
+    """保存预测后触发 facts 重建（失败不影响主流程）。"""
+    try:
+        from src.services.match_fact_builder import rebuild_match_facts
+        rebuild_match_facts(base_dir)
+    except Exception:
+        import logging
+        logging.getLogger("prediction_store").debug("facts rebuild skipped after prediction save")
+
+
 # match_identity 在 src/ 下，app/ 运行时需要把 ROOT 加入 sys.path
 # 这里用延迟导入保持向后兼容
 def _build_match_key(record: dict) -> str:
@@ -161,6 +172,7 @@ def save_prediction(row: dict[str, Any], base_dir: Path | None = None) -> Path:
         out_df = pd.concat([kept_df, pd.DataFrame([new_row])], ignore_index=True)
         _ensure_columns(out_df).to_csv(file_path, index=False, encoding="utf-8-sig")
 
+    _try_rebuild_facts(base_dir)
     return file_path
 
 

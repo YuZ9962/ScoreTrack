@@ -8,6 +8,16 @@ import pandas as pd
 from utils.common import csv_lock, sales_day_key
 
 
+def _try_rebuild_facts(base_dir: Path | None) -> None:
+    """保存 ChatGPT 预测后触发 facts 重建（失败不影响主流程）。"""
+    try:
+        from src.services.match_fact_builder import rebuild_match_facts
+        rebuild_match_facts(base_dir)
+    except Exception:
+        import logging
+        logging.getLogger("chatgpt_store").debug("facts rebuild skipped after chatgpt save")
+
+
 def _build_match_key(record: dict) -> str:
     try:
         from src.domain.match_identity import build_match_key
@@ -125,6 +135,7 @@ def save_chatgpt_prediction(row: dict[str, Any], base_dir: Path | None = None) -
         out = pd.concat([kept, pd.DataFrame([new_row])], ignore_index=True)
         _ensure_cols(out).to_csv(p, index=False, encoding="utf-8-sig")
 
+    _try_rebuild_facts(base_dir)
     return p
 
 
