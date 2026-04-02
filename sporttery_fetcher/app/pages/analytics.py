@@ -132,7 +132,10 @@ def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: _join_main_secondary(r.get("gemini_handicap_main_pick"), r.get("gemini_handicap_secondary_pick")), axis=1
     )
     out["推荐比分"] = out.apply(lambda r: _join_scores(r.get("gemini_score_1"), r.get("gemini_score_2")), axis=1)
-    out["比赛实际比分"] = out.get("full_time_score")
+    score_series = out.get("full_time_score")
+    if score_series is None:
+        score_series = out.get("final_score")
+    out["比赛实际比分"] = score_series
     out["胜平负预测结果"] = out.get("gemini_match_hit") if "gemini_match_hit" in out.columns else out.get("match_hit_result")
     out["让胜平负预测结果"] = out.get("gemini_handicap_hit") if "gemini_handicap_hit" in out.columns else out.get("handicap_hit_result")
     out["数据来源"] = out.get("data_source", pd.Series(["auto"] * len(out))).fillna("auto")
@@ -307,7 +310,7 @@ else:
         "gemini_match_main_pick", "gemini_match_secondary_pick",
         "gemini_handicap_main_pick", "gemini_handicap_secondary_pick",
         "gemini_score_1", "gemini_score_2",
-        "final_score", "match_hit_result", "handicap_hit_result", "data_source",
+        "full_time_score", "final_score", "match_hit_result", "handicap_hit_result", "data_source",
     ]
     for col in show_cols:
         if col not in eval_df.columns:
