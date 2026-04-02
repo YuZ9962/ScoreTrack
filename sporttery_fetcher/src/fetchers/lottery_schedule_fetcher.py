@@ -13,6 +13,7 @@ from typing import Any
 
 from config.settings import settings
 from src.utils.logger import get_logger
+from src.domain.match_time import derive_match_date, infer_issue_date_from_kickoff
 
 # 复用 zqsgkj_fetcher 的 SPA 辅助函数
 from src.fetchers.zqsgkj_fetcher import (
@@ -132,13 +133,19 @@ def _parse_schedule_row(
     if not _is_status_pending(sell_status):
         return None  # 跳过已完成比赛
 
+    kickoff_time = _get("kickoff_time")
+    inferred_issue = infer_issue_date_from_kickoff(kickoff_time)
+
     return {
         "issue_date": issue_date,
+        "issue_date_inferred": inferred_issue,
+        "issue_date_source": "request",
+        "match_date": _get("match_date") or derive_match_date(kickoff_time),
         "match_no": match_no,
         "league": _get("league"),
         "home_team": home_team,
         "away_team": away_team,
-        "kickoff_time": _get("kickoff_time"),
+        "kickoff_time": kickoff_time,
         "handicap": handicap,
         "sell_status": sell_status,
         "spf_win": _get("spf_win"),
