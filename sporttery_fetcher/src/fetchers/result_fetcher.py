@@ -16,6 +16,7 @@ from src.utils.logger import get_logger
 from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches
 from src.services.result_cleaner import append_raw_results
 from src.domain.match_identity import build_match_key
+from src.domain.match_time import derive_match_date, infer_issue_date_from_kickoff, kickoff_belongs_to_issue_date
 
 logger = get_logger("result_fetcher")
 
@@ -174,8 +175,19 @@ class ResultFetcher:
             return rows
         out: list[dict[str, str | None]] = []
         for r in rows:
-            row_date = self._normalize_issue_date(r.get("issue_date"))
-            if row_date == target:
+            kickoff = r.get("kickoff_time")
+            if kickoff and kickoff_belongs_to_issue_date(kickoff, target):
+                out.append(r)
+                continue
+
+            row_issue = self._normalize_issue_date(r.get("issue_date"))
+            inferred_issue = infer_issue_date_from_kickoff(kickoff) if kickoff else None
+            if row_issue == target or inferred_issue == target:
+                out.append(r)
+                continue
+
+            # 历史赛果常缺少 kickoff，避免误删：无明确归属证据时保留
+            if not kickoff and not row_issue:
                 out.append(r)
         return out
 
@@ -214,8 +226,10 @@ class ResultFetcher:
             result_match = "未开奖" if pending else self._parse_outcome(score or "")
             result_handicap = "未开奖" if pending else (self._parse_handicap_result(score, handicap) or None)
 
+            row_match_date = self._normalize_issue_date(self._row_value_by_index(cells, col_map.get("issue_date")))
             row_data = {
                 "issue_date": issue_date,
+                "match_date": row_match_date or None,
                 "match_no": match_no,
                 "league": league,
                 "home_team": home_team,
@@ -305,8 +319,9 @@ class ResultFetcher:
             return None
         text_dump = json.dumps(item, ensure_ascii=False)
 
-        issue_date = next((str(item.get(k))[:10] for k in ["issueDate", "matchDate", "saleDate", "date"] if item.get(k)), None)
-        issue_date = self._normalize_issue_date(issue_date)
+        kickoff_time = next((str(item.get(k)) for k in ["kickoffTime", "matchTime", "matchDateTime", "matchDate"] if item.get(k)), None)
+        source_issue_date = next((str(item.get(k))[:10] for k in ["issueDate", "saleDate", "date"] if item.get(k)), None)
+        issue_date = self._normalize_issue_date(source_issue_date or infer_issue_date_from_kickoff(kickoff_time))
         match_no = next((str(item.get(k)) for k in ["matchNo", "match_no", "weekdayNo", "matchNumStr"] if item.get(k)), None)
         home_team = next((str(item.get(k)) for k in ["homeTeamName", "homeName", "home_team"] if item.get(k)), None)
         away_team = next((str(item.get(k)) for k in ["awayTeamName", "awayName", "away_team"] if item.get(k)), None)
@@ -321,7 +336,8 @@ class ResultFetcher:
             "home_team": home_team,
             "away_team": away_team,
             "handicap": handicap,
-            "kickoff_time": None,
+            "kickoff_time": kickoff_time,
+            "match_date": derive_match_date(kickoff_time),
             "full_time_score": score,
             "result_match": self._parse_outcome(score),
             "result_handicap": result_handicap,
@@ -487,7 +503,8 @@ class ResultFetcher:
             "home_team": str(row.get("home_team") or ""),
             "away_team": str(row.get("away_team") or ""),
             "handicap": handicap,
-            "kickoff_time": None,
+            "kickoff_time": row.get("kickoff_time"),
+            "match_date": str(row.get("match_date") or "") or None,
             "full_time_score": score or None,
             "result_match": self._parse_outcome(score) if score else "未开奖",
             "result_handicap": self._parse_handicap_result(score, handicap) if score and handicap else "未开奖",
@@ -700,11 +717,13 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
     )
 
     # 赛果保存成功后重建事实表
+    facts_rebuilt = False
     try:
         from src.services.match_fact_builder import rebuild_match_facts
         rebuild_match_facts(root)
-    except Exception:
-        logger.debug("facts rebuild skipped after result save")
+        facts_rebuilt = True
+    except Exception as exc:
+        logger.warning("result save后重建facts失败 err=%s", type(exc).__name__)
 
     return {
         "ok": True,
@@ -716,6 +735,7 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
         "written_rows": int(clean_stats.get("clean_rows", 0)),
         "matched_predictions": matched_predictions,
         "bad_rows": int(clean_stats.get("bad_rows", 0)),
+        "facts_rebuilt": facts_rebuilt,
     }
 
 

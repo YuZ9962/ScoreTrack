@@ -13,6 +13,7 @@ from src.fetchers.mobile_fetcher import MobileFetcher
 from src.fetchers.lottery_schedule_fetcher import fetch_lottery_schedule
 from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches, save_zqsgkj_results
 from src.parsers.normalize import normalize_matches
+from src.domain.match_time import normalize_issue_date as normalize_issue_date_text
 from src.utils.logger import get_logger
 from src.utils.save import save_csv, save_json
 
@@ -159,7 +160,10 @@ def parse_args() -> argparse.Namespace:
 def normalize_issue_date(value: str | None) -> str:
     if not value:
         return date.today().isoformat()
-    return parse_date(value).date().isoformat()
+    try:
+        return parse_date(value).date().isoformat()
+    except Exception:
+        return normalize_issue_date_text(value)
 
 
 def main() -> None:

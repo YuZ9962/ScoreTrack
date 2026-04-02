@@ -113,9 +113,12 @@ def _row_to_record(issue_date: str, cols: list[str]) -> dict[str, str]:
     home_team, handicap, away_team = _parse_team_text(team_text)
     scrape_time = datetime.utcnow().isoformat()
 
+    match_date = cols[0]
     return {
         "issue_date": issue_date,
-        "match_date": cols[0],
+        "issue_date_inferred": None,
+        "issue_date_source": "query_window_no_kickoff",
+        "match_date": match_date,
         "match_no": cols[1],
         "league": cols[2],
         "home_team": home_team,
@@ -913,8 +916,15 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
             logger.info("尝试抓取赛果 url=%s issue_date=%s", url, issue_date)
             rows = _fetch_zqsgkj_from_url(issue_date, url)
             if rows:
-                logger.info("赛果抓取成功 url=%s count=%s", url, len(rows))
-                return rows
+                final_rows, dropped = _filter_rows_by_issue_window_and_match_no(issue_date, rows)
+                logger.info(
+                    "赛果抓取成功 url=%s raw_count=%s final_count=%s dropped_after_top_filter=%s",
+                    url,
+                    len(rows),
+                    len(final_rows),
+                    dropped,
+                )
+                return final_rows
             logger.info("赛果抓取返回0条 url=%s，尝试下一个候选", url)
         except Exception as exc:
             logger.warning("赛果抓取异常 url=%s err=%s，尝试下一个候选", url, type(exc).__name__)
@@ -989,8 +999,6 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
             new_state.get("html_excerpt"),
         )
 
-        # 仅在表单填写本身失败时才触发URL兜底；
-        # 若 loaded_first_date 在查询窗口 [start_date, end_date] 内，说明查询已生效，无需兜底。
         loaded_first_date = new_state.get("first_date", "")
         in_window = bool(loaded_first_date) and start_date <= loaded_first_date <= end_date
         if in_window:
@@ -998,22 +1006,32 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
                 "查询成功：loaded_first_date=%s 在查询窗口 [%s, %s] 内，跳过URL兜底",
                 loaded_first_date, start_date, end_date,
             )
-        elif not js_set_ok:
+        else:
             logger.warning(
-                "表单日期填写失败（js_set_ok=False），尝试URL参数兜底导航",
+                "表单提交后首条日期 loaded=%s 不在查询窗口内（期望范围 [%s, %s]），尝试URL参数兜底",
+                loaded_first_date, start_date, end_date,
             )
             url_ok = _try_url_param_navigation(page, start_date, end_date, base_url=base_url)
             if url_ok:
                 changed = True
                 new_state = _extract_matchlist_state(page)
-                logger.info("URL参数兜底成功 new_first_date=%s", new_state.get("first_date"))
-            else:
-                logger.warning("URL参数兜底也未能定位到目标日期，继续使用当前页面数据（将依赖 match_date 字段过滤）")
-        else:
-            logger.warning(
-                "表单提交后首条日期 loaded=%s 不在查询窗口内（期望范围 [%s, %s]），可能无当日赛事",
-                loaded_first_date, start_date, end_date,
-            )
+                loaded_first_date = new_state.get("first_date", "")
+                in_window = bool(loaded_first_date) and start_date <= loaded_first_date <= end_date
+                logger.info(
+                    "URL参数兜底结果 first_date=%s in_window=%s",
+                    loaded_first_date,
+                    in_window,
+                )
+
+            # 兜底后仍不在窗口：判定本次查询未命中目标期，直接返回空，避免误用当前页默认数据
+            if not in_window:
+                logger.warning(
+                    "目标 issue_date=%s 查询未命中（first_date=%s），放弃当前页面数据，返回空结果",
+                    issue_date,
+                    loaded_first_date,
+                )
+                browser.close()
+                return []
 
         if not changed:
             logger.warning("日期查询未生效：#matchList在两次提交后仍未变化，停止后续过滤链路")
@@ -1088,46 +1106,57 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
     deduped = _dedup_records(all_rows)
     logger.info("去重后比赛数=%s", len(deduped))
 
-    # ── 过滤策略 ──────────────────────────────────────────────────────────────
-    # issue_date = 销售日，match_date = 实际比赛日期，两者不一定相等。
-    # 例如：销售日 2026-04-01 的竞彩可以包含当天晚上或次日凌晨开踢的比赛。
-    # 旧的 match_date == issue_date 硬过滤会把跨自然日比赛全部丢弃，已确认为 bug。
-    #
-    # 新策略：
-    # 1. 页面已按 issue_date 查询，返回的记录属于该期销售窗口，不再按 match_date 精确过滤。
-    # 2. 宽松保留：match_date 在 issue_date 前后 3 天以内的记录（含空 match_date）。
-    #    这可以防止分页抓取到其它期的溢出数据，同时不丢弃跨日比赛。
-    from datetime import date as _date, timedelta as _timedelta
-    try:
-        target_dt = _date.fromisoformat(issue_date)
-        window_start = (target_dt - _timedelta(days=1)).isoformat()
-        window_end = (target_dt + _timedelta(days=3)).isoformat()
-    except ValueError:
-        window_start = window_end = issue_date
-
-    filtered: list[dict[str, str]] = []
-    for r in deduped:
-        md = str(r.get("match_date", "") or "").strip()
-        if not md:
-            # match_date 为空时保留（无法判断，宁可保留）
-            filtered.append(r)
-        elif window_start <= md <= window_end:
-            filtered.append(r)
-        else:
-            logger.debug(
-                "过滤超窗口记录 match_date=%s issue_date=%s match_no=%s",
-                md, issue_date, r.get("match_no", ""),
-            )
-
+    filtered, dropped = _filter_rows_by_issue_window_and_match_no(issue_date, deduped)
+    weekday_prefix = _target_weekday_prefix(issue_date)
     logger.info(
-        "宽松窗口过滤 issue_date=%s window=[%s, %s] 过滤前=%s 过滤后=%s",
-        issue_date, window_start, window_end, len(deduped), len(filtered),
+        "issue_date窗口+match_no过滤 issue_date=%s weekday_prefix=%s before=%s after=%s dropped=%s",
+        issue_date,
+        weekday_prefix,
+        len(deduped),
+        len(filtered),
+        dropped,
     )
     if not filtered:
         logger.info("日期 %s 无可用赛果（可能当日无竞彩足球赛事）", issue_date)
 
     return filtered
 
+
+
+def _filter_rows_by_issue_window_and_match_no(issue_date: str, rows: list[dict[str, str]]) -> tuple[list[dict[str, str]], int]:
+    """按 issue_date 过滤历史赛果：
+
+    1) 自然日只保留 D / D+1（销售窗口覆盖日）
+    2) 优先使用 match_no 的星期前缀定位销售日归属（如 issue_date=周一，则保留 周一xxx）
+    """
+    from datetime import date as _date, timedelta as _timedelta
+
+    try:
+        base_d = _date.fromisoformat(issue_date)
+        allow_dates = {base_d.isoformat(), (base_d + _timedelta(days=1)).isoformat()}
+    except ValueError:
+        allow_dates = {issue_date}
+
+    weekday_prefix = _target_weekday_prefix(issue_date)
+    out: list[dict[str, str]] = []
+    dropped = 0
+
+    for r in rows:
+        md = str(r.get("match_date") or "").strip()
+        mn = str(r.get("match_no") or "").strip()
+
+        if md and md not in allow_dates:
+            dropped += 1
+            continue
+
+        # match_no 能识别时，按 issue_date 的星期前缀做强约束
+        if weekday_prefix and mn and not mn.startswith(weekday_prefix):
+            dropped += 1
+            continue
+
+        out.append(r)
+
+    return out, dropped
 
 def save_zqsgkj_results(issue_date: str, records: list[dict[str, str]], base_dir: Path | None = None) -> tuple[Path, Path]:
     root = base_dir or settings.base_dir

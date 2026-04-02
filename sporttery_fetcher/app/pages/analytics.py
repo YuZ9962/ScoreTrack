@@ -31,6 +31,7 @@ from services.transforms import (
     sort_by_match_no,
 )
 from src.fetchers.result_fetcher import fetch_and_save_results
+from src.services.match_fact_builder import rebuild_match_facts
 from utils.formatting import semantic_match_labels
 
 TIME_MODES = ["按日", "按月", "按年"]
@@ -50,6 +51,14 @@ def _run_daily_result_update(base_dir: Path, issue_date: str | None = None) -> t
             f"issue_date={result.get('issue_date')} mode={result.get('mode')} parsed={result.get('parsed_rows')}"
         )
 
+    facts_msg = "facts=ok"
+    if not result.get("facts_rebuilt"):
+        try:
+            rebuild_match_facts(base_dir)
+            facts_msg = "facts=rebuilt_in_analytics"
+        except Exception as exc:
+            facts_msg = f"facts=failed({type(exc).__name__})"
+
     msg = (
         "更新完成："
         f"issue_date={result.get('issue_date')} | "
@@ -57,7 +66,8 @@ def _run_daily_result_update(base_dir: Path, issue_date: str | None = None) -> t
         f"parsed={result.get('parsed_rows')} | "
         f"clean={result.get('written_rows')} | "
         f"bad={result.get('bad_rows', 0)} | "
-        f"matched_predictions={result.get('matched_predictions', 0)}"
+        f"matched_predictions={result.get('matched_predictions', 0)} | "
+        f"{facts_msg}"
     )
     return True, msg
 
@@ -122,7 +132,10 @@ def _build_cn_table(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: _join_main_secondary(r.get("gemini_handicap_main_pick"), r.get("gemini_handicap_secondary_pick")), axis=1
     )
     out["推荐比分"] = out.apply(lambda r: _join_scores(r.get("gemini_score_1"), r.get("gemini_score_2")), axis=1)
-    out["比赛实际比分"] = out.get("full_time_score")
+    score_series = out.get("full_time_score")
+    if score_series is None:
+        score_series = out.get("final_score")
+    out["比赛实际比分"] = score_series
     out["胜平负预测结果"] = out.get("gemini_match_hit") if "gemini_match_hit" in out.columns else out.get("match_hit_result")
     out["让胜平负预测结果"] = out.get("gemini_handicap_hit") if "gemini_handicap_hit" in out.columns else out.get("handicap_hit_result")
     out["数据来源"] = out.get("data_source", pd.Series(["auto"] * len(out))).fillna("auto")
@@ -297,7 +310,7 @@ else:
         "gemini_match_main_pick", "gemini_match_secondary_pick",
         "gemini_handicap_main_pick", "gemini_handicap_secondary_pick",
         "gemini_score_1", "gemini_score_2",
-        "final_score", "match_hit_result", "handicap_hit_result", "data_source",
+        "full_time_score", "final_score", "match_hit_result", "handicap_hit_result", "data_source",
     ]
     for col in show_cols:
         if col not in eval_df.columns:
