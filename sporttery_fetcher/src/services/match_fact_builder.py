@@ -451,6 +451,52 @@ def merge_match_facts(
         result_sub = _ensure_mk(result_df)
         df = _merge_left_by_match_key(df, result_sub, result_cols)
 
+        # 回退：match_key 不一致时（base=raw:xxx, result=biz:...），
+        # 对仍无 full_time_score 的行尝试用业务复合键二次 join
+        unmatched_mask = df["full_time_score"].isna() | (df["full_time_score"].astype(str).str.strip() == "")
+        if unmatched_mask.any():
+            BIZ_KEYS = ["issue_date", "match_no", "home_team", "away_team"]
+            result_biz = result_sub.copy()
+            for k in BIZ_KEYS:
+                if k in result_biz.columns:
+                    result_biz[k] = result_biz[k].astype(str).str.strip()
+                else:
+                    result_biz[k] = ""
+            result_biz = result_biz.drop_duplicates(subset=BIZ_KEYS, keep="last")
+
+            # 取 base 中未匹配的行，保留原始 index
+            unmatched_idx = df.index[unmatched_mask]
+            unmatched_df = df.loc[unmatched_idx].copy()
+            for k in BIZ_KEYS:
+                if k in unmatched_df.columns:
+                    unmatched_df[k] = unmatched_df[k].astype(str).str.strip()
+                else:
+                    unmatched_df[k] = ""
+
+            cols_needed = BIZ_KEYS + [c for c in result_cols if c in result_biz.columns]
+            fill = (
+                unmatched_df
+                .drop(columns=[c for c in result_cols if c in unmatched_df.columns], errors="ignore")
+                .reset_index(drop=False)
+                .merge(result_biz[cols_needed], on=BIZ_KEYS, how="left")
+                .set_index("index")
+            )
+
+            # 将查到结果的行写回 df（仅覆盖有值的格子，index 对齐）
+            filled_count = 0
+            for c in result_cols:
+                if c in fill.columns:
+                    has_value = fill[c].notna() & (fill[c].astype(str).str.strip() != "")
+                    if has_value.any():
+                        df.loc[fill.index[has_value], c] = fill.loc[has_value, c]
+                        filled_count += int(has_value.sum())
+
+            logger.debug(
+                "result fallback biz-key join: unmatched=%s filled_cells=%s",
+                int(unmatched_mask.sum()),
+                filled_count,
+            )
+
     # result_status 衍生字段
     df["result_status"] = df.apply(
         lambda r: "已开奖" if _normalize_text(r.get("result_match")) not in ("", "未开奖") else "未开奖",
