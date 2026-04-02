@@ -27,7 +27,11 @@ from typing import Any
 import pandas as pd
 from filelock import FileLock
 
-logger = logging.getLogger("match_fact_builder")
+try:
+    from src.utils.logger import get_logger
+    logger = get_logger("match_fact_builder")
+except Exception:
+    logger = logging.getLogger("match_fact_builder")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 事实表字段定义
@@ -450,7 +454,9 @@ def merge_match_facts(
         # 对仍无 full_time_score 的行尝试用业务复合键二次 join
         unmatched_mask = df["full_time_score"].isna() | (df["full_time_score"].astype(str).str.strip() == "")
         if unmatched_mask.any():
-            BIZ_KEYS = ["issue_date", "match_no", "home_team", "away_team"]
+            # issue_date + match_no 在同一销售日内唯一，无需加队名
+            # （API base 用全称，zqsgkj result 用简称，两者不匹配）
+            BIZ_KEYS = ["issue_date", "match_no"]
             result_biz = result_sub.copy()
             for k in BIZ_KEYS:
                 if k in result_biz.columns:
