@@ -31,6 +31,7 @@ from services.transforms import (
     sort_by_match_no,
 )
 from src.fetchers.result_fetcher import fetch_and_save_results
+from src.services.match_fact_builder import rebuild_match_facts
 from utils.formatting import semantic_match_labels
 
 TIME_MODES = ["按日", "按月", "按年"]
@@ -50,6 +51,14 @@ def _run_daily_result_update(base_dir: Path, issue_date: str | None = None) -> t
             f"issue_date={result.get('issue_date')} mode={result.get('mode')} parsed={result.get('parsed_rows')}"
         )
 
+    facts_msg = "facts=ok"
+    if not result.get("facts_rebuilt"):
+        try:
+            rebuild_match_facts(base_dir)
+            facts_msg = "facts=rebuilt_in_analytics"
+        except Exception as exc:
+            facts_msg = f"facts=failed({type(exc).__name__})"
+
     msg = (
         "更新完成："
         f"issue_date={result.get('issue_date')} | "
@@ -57,7 +66,8 @@ def _run_daily_result_update(base_dir: Path, issue_date: str | None = None) -> t
         f"parsed={result.get('parsed_rows')} | "
         f"clean={result.get('written_rows')} | "
         f"bad={result.get('bad_rows', 0)} | "
-        f"matched_predictions={result.get('matched_predictions', 0)}"
+        f"matched_predictions={result.get('matched_predictions', 0)} | "
+        f"{facts_msg}"
     )
     return True, msg
 

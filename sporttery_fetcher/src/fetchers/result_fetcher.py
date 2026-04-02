@@ -717,11 +717,13 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
     )
 
     # 赛果保存成功后重建事实表
+    facts_rebuilt = False
     try:
         from src.services.match_fact_builder import rebuild_match_facts
         rebuild_match_facts(root)
-    except Exception:
-        logger.debug("facts rebuild skipped after result save")
+        facts_rebuilt = True
+    except Exception as exc:
+        logger.warning("result save后重建facts失败 err=%s", type(exc).__name__)
 
     return {
         "ok": True,
@@ -733,6 +735,7 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
         "written_rows": int(clean_stats.get("clean_rows", 0)),
         "matched_predictions": matched_predictions,
         "bad_rows": int(clean_stats.get("bad_rows", 0)),
+        "facts_rebuilt": facts_rebuilt,
     }
 
 
