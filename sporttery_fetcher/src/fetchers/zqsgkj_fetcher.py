@@ -10,6 +10,7 @@ from typing import Any
 
 from config.settings import settings
 from src.utils.logger import get_logger
+from src.domain.match_time import infer_issue_date_from_kickoff
 
 logger = get_logger("zqsgkj_fetcher")
 
@@ -1104,7 +1105,7 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
     if not filtered:
         logger.info("日期 %s 无可用赛果（可能当日无竞彩足球赛事）", issue_date)
 
-    return filtered
+    return deduped
 
 
 
