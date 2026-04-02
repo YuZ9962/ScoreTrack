@@ -7,6 +7,7 @@ import pandas as pd
 from services.chatgpt_store import load_chatgpt_predictions as _load_chatgpt_predictions
 from services.prediction_store import load_predictions as _load_predictions
 from src.services.result_cleaner import load_clean_results
+from services.transforms import ensure_issue_date_columns
 from src.services.match_fact_builder import (
     load_match_facts as _load_facts,
     rebuild_match_facts as _rebuild_facts,
@@ -162,11 +163,12 @@ def load_match_facts(base_dir: Path | None = None) -> pd.DataFrame:
 
 
 def load_match_facts_by_date(date_str: str, base_dir: Path | None = None) -> pd.DataFrame:
-    """按 issue_date 筛选事实表。"""
+    """按销售日 issue_date 筛选事实表（支持从 kickoff_time 推断缺失 issue_date）。"""
     df = _load_facts(base_dir)
-    if df.empty or "issue_date" not in df.columns:
+    if df.empty:
         return pd.DataFrame(columns=FACT_COLUMNS)
-    return df[df["issue_date"].astype(str) == str(date_str)].copy()
+    enriched = ensure_issue_date_columns(df, source_col="issue_date")
+    return enriched[enriched["_date"].astype(str) == str(date_str)].copy()
 
 
 def get_or_rebuild_match_facts(base_dir: Path | None = None) -> pd.DataFrame:
