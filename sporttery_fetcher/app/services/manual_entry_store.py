@@ -12,6 +12,15 @@ import pandas as pd
 from services.prediction_store import save_prediction
 from src.services.result_cleaner import append_raw_results, load_clean_results
 
+
+def _try_rebuild_facts(base_dir: Path | None) -> None:
+    """手动补录/历史抓取写入后触发 facts 重建（失败不影响主流程）。"""
+    try:
+        from src.services.match_fact_builder import rebuild_match_facts
+        rebuild_match_facts(base_dir)
+    except Exception:
+        logging.getLogger("manual_entry_store").debug("facts rebuild skipped")
+
 logger = logging.getLogger(__name__)
 
 MATCH_COLUMNS = [
@@ -311,6 +320,8 @@ def upsert_history_fetch_results(records: list[dict[str, Any]], base_dir: Path |
         after_count,
     )
 
+    _try_rebuild_facts(base_dir)
+
     return {
         "inserted": inserted,
         "updated": updated,
@@ -364,4 +375,6 @@ def save_history_entry(
         message = "保存成功：检测到同场次已存在，已执行覆盖更新"
     else:
         message = "保存成功：已新增历史场次"
+
+    _try_rebuild_facts(base_dir)
     return SaveResult(True, message, match_updated, prediction_updated, result_updated)

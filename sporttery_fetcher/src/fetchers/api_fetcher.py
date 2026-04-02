@@ -88,9 +88,14 @@ class APIFetcher:
                 sell_status_raw = item.get("sellStatus")
                 sell_status = self._normalize_sell_status(match_status, sell_status_raw)
 
+                # match_date = 实际比赛日期（从 matchDate 字段或 kickoff_time 前10字符提取）
+                # 注意：issue_date(business_date) = 销售日，与 match_date 可能不同
+                resolved_match_date = match_date or (kickoff_time[:10] if kickoff_time and len(kickoff_time) >= 10 else None)
+
                 out.append(
                     {
                         "issue_date": business_date or issue_date,
+                        "match_date": resolved_match_date,
                         "match_no": self._str_or_none(item.get("matchNumStr")),
                         "league": self._str_or_none(item.get("leagueAllName")) or self._str_or_none(item.get("leagueAbbName")),
                         "home_team": self._str_or_none(item.get("homeTeamAllName")) or self._str_or_none(item.get("homeTeamAbbName")),

@@ -15,6 +15,7 @@ from src.utils.http import HTTPClient
 from src.utils.logger import get_logger
 from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches
 from src.services.result_cleaner import append_raw_results
+from src.domain.match_identity import build_match_key
 
 logger = get_logger("result_fetcher")
 
@@ -213,23 +214,23 @@ class ResultFetcher:
             result_match = "未开奖" if pending else self._parse_outcome(score or "")
             result_handicap = "未开奖" if pending else (self._parse_handicap_result(score, handicap) or None)
 
-            rows.append(
-                {
-                    "issue_date": issue_date,
-                    "match_no": match_no,
-                    "league": league,
-                    "home_team": home_team,
-                    "away_team": away_team,
-                    "handicap": handicap,
-                    "kickoff_time": None,
-                    "full_time_score": score,
-                    "result_match": result_match,
-                    "result_handicap": result_handicap,
-                    "raw_result_text": " | ".join(cells),
-                    "result_generated_at": datetime.now(timezone.utc).isoformat(),
-                    "raw_id": None,
-                }
-            )
+            row_data = {
+                "issue_date": issue_date,
+                "match_no": match_no,
+                "league": league,
+                "home_team": home_team,
+                "away_team": away_team,
+                "handicap": handicap,
+                "kickoff_time": None,
+                "full_time_score": score,
+                "result_match": result_match,
+                "result_handicap": result_handicap,
+                "raw_result_text": " | ".join(cells),
+                "result_generated_at": datetime.now(timezone.utc).isoformat(),
+                "raw_id": None,
+            }
+            row_data["match_key"] = build_match_key(row_data)
+            rows.append(row_data)
 
         return rows
 
@@ -313,7 +314,7 @@ class ResultFetcher:
         handicap = next((str(item.get(k)) for k in ["handicap", "rangqiu", "rq"] if item.get(k) is not None), None)
         result_handicap = next((str(item.get(k)) for k in ["rqResult", "resultHandicap", "result_handicap"] if item.get(k)), None)
 
-        return {
+        row_data = {
             "issue_date": issue_date,
             "match_no": match_no,
             "league": league,
@@ -328,6 +329,8 @@ class ResultFetcher:
             "result_generated_at": datetime.now(timezone.utc).isoformat(),
             "raw_id": str(item.get("id") or item.get("matchId") or "") or None,
         }
+        row_data["match_key"] = build_match_key(row_data)
+        return row_data
 
     def _extract_rows_from_json(self, data: Any) -> list[dict[str, str | None]]:
         rows: list[dict[str, str | None]] = []
@@ -477,7 +480,7 @@ class ResultFetcher:
     def _convert_zqsgkj_row(self, row: dict[str, str]) -> dict[str, str | None]:
         score = str(row.get("full_score") or "").strip()
         handicap = str(row.get("handicap") or "").strip() or None
-        return {
+        result_row: dict[str, str | None] = {
             "issue_date": str(row.get("issue_date") or ""),
             "match_no": str(row.get("match_no") or ""),
             "league": str(row.get("league") or ""),
@@ -492,6 +495,8 @@ class ResultFetcher:
             "result_generated_at": datetime.now(timezone.utc).isoformat(),
             "raw_id": None,
         }
+        result_row["match_key"] = build_match_key(result_row)
+        return result_row
 
     def fetch_results_by_date(self, issue_date: str) -> tuple[list[dict[str, str | None]], int, str]:
         target_date = self._normalize_issue_date(issue_date)
@@ -598,13 +603,26 @@ def _count_matched_predictions(base_dir: Path, result_df: pd.DataFrame) -> int:
         match_no = str(row.get("match_no", "") or "").strip()
         home_team = str(row.get("home_team", "") or "").strip()
         away_team = str(row.get("away_team", "") or "").strip()
+        pred_mk = str(row.get("match_key", "") or "").strip()
 
-        if raw_id and "raw_id" in result_df.columns:
-            m = result_df[result_df["raw_id"].astype(str) == raw_id]
+        # 优先通过 match_key 匹配
+        if pred_mk and "match_key" in result_df.columns:
+            m = result_df[result_df["match_key"].astype(str) == pred_mk]
             if not m.empty:
                 matched += 1
                 continue
 
+        # 降级：issue_date + raw_id
+        if raw_id and "raw_id" in result_df.columns:
+            m = result_df[
+                (result_df["issue_date"].astype(str) == issue_date)
+                & (result_df["raw_id"].astype(str) == raw_id)
+            ]
+            if not m.empty:
+                matched += 1
+                continue
+
+        # 降级：issue_date + match_no + home + away
         m = result_df[
             (result_df["issue_date"].astype(str) == issue_date)
             & (result_df["match_no"].astype(str) == match_no)
@@ -680,6 +698,13 @@ def fetch_and_save_results(base_dir: Path | None = None, issue_date: str | None 
         matched_predictions,
         path,
     )
+
+    # 赛果保存成功后重建事实表
+    try:
+        from src.services.match_fact_builder import rebuild_match_facts
+        rebuild_match_facts(root)
+    except Exception:
+        logger.debug("facts rebuild skipped after result save")
 
     return {
         "ok": True,

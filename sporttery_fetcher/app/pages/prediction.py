@@ -11,6 +11,8 @@ APP_DIR = Path(__file__).resolve().parents[1]
 ROOT = APP_DIR.parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from components.data_controls import render_date_file_selector, render_fetch_section
 from services.chatgpt_parser import parse_chatgpt_output
@@ -18,11 +20,12 @@ from services.chatgpt_runner import run_chatgpt_prediction
 from services.chatgpt_store import delete_chatgpt_predictions, load_chatgpt_predictions, save_chatgpt_prediction
 from services.gemini_parser import parse_gemini_output, parse_manual_raw_text
 from services.gemini_runner import run_gemini_prediction
-from services.loader import get_data_context, load_matches_by_date
+from services.loader import get_data_context, load_match_facts_by_date, load_matches_by_date
 from services.prediction_store import delete_predictions, load_predictions, save_prediction
 from services.transforms import normalize_dataframe, sort_by_match_no
 from utils.chatgpt_prompt_builder import build_chatgpt_probability_prompt
 from utils.prompt_builder import build_simple_prediction_prompt
+from src.domain.match_identity import build_match_key
 
 STATUS_SUCCESS = "success"
 STATUS_FAILED = "failed"
@@ -46,6 +49,14 @@ def _match_label(row: pd.Series) -> str:
 
 
 def _get_prediction_row(pred_df: pd.DataFrame, issue_date: str, match_row: pd.Series) -> pd.Series | None:
+    """查找当前场次的预测记录。
+
+    严格匹配逻辑，禁止"只按 match_no"或"只按队名"匹配（跨日串场根源）。
+    优先级：
+    1. match_key（若两边都有）
+    2. issue_date + raw_id
+    3. issue_date + match_no + home_team + away_team
+    """
     if pred_df.empty:
         return None
 
@@ -53,36 +64,31 @@ def _get_prediction_row(pred_df: pd.DataFrame, issue_date: str, match_row: pd.Se
     match_no = str(match_row.get("match_no", "") or "").strip()
     home_team = str(match_row.get("home_team", "") or "").strip()
     away_team = str(match_row.get("away_team", "") or "").strip()
-    kickoff_date = str(match_row.get("kickoff_time", "") or "").strip()[:10]
 
+    # 1. 通过 match_key 匹配（最精确）
+    match_key_val = str(match_row.get("match_key") or build_match_key(match_row.to_dict())).strip()
+    if match_key_val and "match_key" in pred_df.columns:
+        m = pred_df[pred_df["match_key"].astype(str) == match_key_val]
+        if not m.empty:
+            return m.iloc[-1]
+
+    # 2. issue_date + raw_id（必须带 issue_date，防止跨日误配）
     if raw_id and "raw_id" in pred_df.columns:
-        m = pred_df[pred_df["raw_id"].astype(str) == raw_id]
+        m = pred_df[
+            (pred_df["issue_date"].astype(str) == issue_date)
+            & (pred_df["raw_id"].astype(str) == raw_id)
+        ]
         if not m.empty:
             return m.iloc[-1]
 
-    if match_no:
-        m = pred_df[pred_df["match_no"].astype(str) == match_no]
-        if not m.empty:
-            return m.iloc[-1]
-
+    # 3. issue_date + match_no + home + away（四字段联合，禁止省略 issue_date）
     if match_no and home_team and away_team:
         m = pred_df[
-            (pred_df["match_no"].astype(str) == match_no)
+            (pred_df["issue_date"].astype(str) == issue_date)
+            & (pred_df["match_no"].astype(str) == match_no)
             & (pred_df["home_team"].astype(str) == home_team)
             & (pred_df["away_team"].astype(str) == away_team)
         ]
-        if not m.empty:
-            return m.iloc[-1]
-
-    if home_team and away_team:
-        m = pred_df[
-            (pred_df["home_team"].astype(str) == home_team)
-            & (pred_df["away_team"].astype(str) == away_team)
-        ]
-        if kickoff_date and "kickoff_time" in m.columns:
-            m2 = m[m["kickoff_time"].astype(str).str[:10] == kickoff_date]
-            if not m2.empty:
-                return m2.iloc[-1]
         if not m.empty:
             return m.iloc[-1]
 
@@ -113,6 +119,22 @@ def _is_pending_or_failed(pred_row: pd.Series | None) -> bool:
     return str(pred_row.get("prediction_status", "")) in {"", STATUS_FAILED, STATUS_PENDING}
 
 
+def _get_fact_row(facts_df: pd.DataFrame, match_key_val: str) -> pd.Series | None:
+    """从事实表按 match_key 查找对应行（优先路径）。"""
+    if facts_df.empty or not match_key_val or "match_key" not in facts_df.columns:
+        return None
+    m = facts_df[facts_df["match_key"].astype(str) == match_key_val]
+    return m.iloc[-1] if not m.empty else None
+
+
+def _fact_gemini_status(fact_row: pd.Series | None) -> str | None:
+    """从事实表行提取 Gemini 预测状态（None 表示未找到）。"""
+    if fact_row is None:
+        return None
+    status = str(fact_row.get("gemini_prediction_status") or "").strip()
+    return status if status else None
+
+
 def _predict_single_chatgpt(match: pd.Series, issue_date: str) -> dict[str, object]:
     prompt = build_chatgpt_probability_prompt(
         league=str(match.get("league", "")),
@@ -137,6 +159,7 @@ def _predict_single_chatgpt(match: pd.Series, issue_date: str) -> dict[str, obje
         "kickoff_time": match.get("kickoff_time", ""),
         "handicap": match.get("handicap", ""),
         "raw_id": match.get("raw_id", ""),
+        "match_key": str(match.get("match_key") or build_match_key(match.to_dict())).strip(),
     }
     if not result.get("ok"):
         save_chatgpt_prediction(
@@ -215,6 +238,7 @@ def _predict_single_match(match: pd.Series, issue_date: str) -> dict[str, object
         "kickoff_time": match.get("kickoff_time", ""),
         "handicap": match.get("handicap", ""),
         "raw_id": match.get("raw_id", ""),
+        "match_key": str(match.get("match_key") or build_match_key(match.to_dict())).strip(),
         "prediction_source": SOURCE_AUTO,
         "is_manual": False,
     }
@@ -351,6 +375,7 @@ def render_manual_dialog(match_row: pd.Series, issue_date: str):
             "kickoff_time": match_row.get("kickoff_time", ""),
             "handicap": match_row.get("handicap", ""),
             "raw_id": match_row.get("raw_id", ""),
+            "match_key": str(match_row.get("match_key") or build_match_key(match_row.to_dict())).strip(),
             "gemini_prompt": None,
             "gemini_raw_text": raw_text,
             "raw_text": raw_text,
@@ -421,8 +446,18 @@ selected_match = filtered_df.iloc[int(selected_index)]
 pred_df = load_predictions(ROOT)
 only_missing = st.checkbox("仅预测尚未生成 Gemini 结果的比赛", value=False)
 
+# 优先从事实表取当前场次状态（保证与 Analytics 看到的是同一套数据）
+_facts_for_date = load_match_facts_by_date(selected_date, ROOT)
+_match_key_val = str(selected_match.get("match_key") or build_match_key(selected_match.to_dict())).strip()
+_fact_row = _get_fact_row(_facts_for_date, _match_key_val)
+_fact_status = _fact_gemini_status(_fact_row)
+
 single_pred = _get_prediction_row(pred_df, selected_date, selected_match)
-st.info(f"当前场次状态：{_status_text(single_pred)}")
+# 当 facts 有状态时优先展示，否则降级到旧逻辑
+if _fact_status:
+    st.info(f"当前场次状态（facts）：{_fact_status}")
+else:
+    st.info(f"当前场次状态：{_status_text(single_pred)}")
 
 st.markdown("---")
 col_a, col_b, col_c, col_d = st.columns(4)
@@ -472,6 +507,7 @@ with col_b:
                             "kickoff_time": row.get("kickoff_time", ""),
                             "handicap": row.get("handicap", ""),
                             "raw_id": row.get("raw_id", ""),
+                            "match_key": str(row.get("match_key") or build_match_key(row.to_dict())).strip(),
                             "prediction_source": SOURCE_AUTO,
                             "prediction_status": STATUS_FAILED,
                             "is_manual": False,
@@ -573,10 +609,12 @@ if st.button("删除所选比赛", type="secondary"):
         to_delete = filtered_df.iloc[delete_indices].copy()
         keys = [
             {
+                "issue_date": selected_date,
                 "raw_id": str(r.get("raw_id", "") or "").strip(),
                 "match_no": str(r.get("match_no", "") or "").strip(),
                 "home_team": str(r.get("home_team", "") or "").strip(),
                 "away_team": str(r.get("away_team", "") or "").strip(),
+                "match_key": str(r.get("match_key") or build_match_key(r.to_dict())).strip(),
             }
             for _, r in to_delete.iterrows()
         ]
@@ -588,11 +626,15 @@ if st.button("删除所选比赛", type="secondary"):
             keep_mask = pd.Series([True] * len(src_df))
             for k in keys:
                 raw_id = k["raw_id"]
-                if raw_id and "raw_id" in src_df.columns:
+                mk = k.get("match_key", "")
+                if mk and "match_key" in src_df.columns:
+                    keep_mask &= src_df["match_key"].astype(str) != mk
+                elif raw_id and "raw_id" in src_df.columns:
                     keep_mask &= src_df["raw_id"].astype(str) != raw_id
                 else:
                     keep_mask &= ~(
-                        (src_df["match_no"].astype(str) == k["match_no"])
+                        (src_df["issue_date"].astype(str) == k["issue_date"])
+                        & (src_df["match_no"].astype(str) == k["match_no"])
                         & (src_df["home_team"].astype(str) == k["home_team"])
                         & (src_df["away_team"].astype(str) == k["away_team"])
                     )
