@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 from config.settings import settings
 from src.utils.http import HTTPClient
+from src.domain.match_time import derive_match_date, infer_issue_date_from_kickoff
 from src.utils.logger import get_logger
 from src.utils.save import save_html_snapshot
 
@@ -66,10 +67,12 @@ class HTMLFetcher:
             if not self._looks_like_match_row(merged):
                 continue
 
-            issue = self._extract_issue_date(merged) or issue_date
+            issue_from_row = self._extract_issue_date(merged)
             handicap = self._extract_handicap_row(row, texts)
             home, away = self._extract_teams(merged, texts)
-            kickoff = self._extract_kickoff(merged, issue)
+            kickoff = self._extract_kickoff(merged, issue_date)
+            inferred_issue = infer_issue_date_from_kickoff(kickoff)
+            issue = issue_from_row or inferred_issue or issue_date
 
             if not (home and away):
                 continue
@@ -80,6 +83,9 @@ class HTMLFetcher:
             records.append(
                 {
                     "issue_date": issue,
+                    "issue_date_inferred": inferred_issue,
+                    "issue_date_source": "row_text" if issue_from_row else ("inferred" if inferred_issue else "request"),
+                    "match_date": derive_match_date(kickoff),
                     "match_no": self._extract_match_no(merged),
                     "league": self._extract_league(texts),
                     "home_team": home,
@@ -160,13 +166,21 @@ class HTMLFetcher:
                         return v
             return None
 
+        kickoff_time = pick("matchDate", "matchTime")
+        inferred_issue = infer_issue_date_from_kickoff(kickoff_time)
+        source_issue = pick("businessDate", "issueDate", "date")
+        resolved_issue = source_issue or inferred_issue or issue_date
+
         return {
-            "issue_date": pick("businessDate", "issueDate", "date") or issue_date,
+            "issue_date": resolved_issue,
+            "issue_date_inferred": inferred_issue,
+            "issue_date_source": "source_field" if source_issue else ("inferred" if inferred_issue else "request"),
+            "match_date": derive_match_date(kickoff_time),
             "match_no": pick("lineNum", "matchNo"),
             "league": pick("leagueAllName", "leagueAbbName", "leagueName"),
             "home_team": pick("homeTeamAllName", "homeTeamAbbName", "homeTeamName"),
             "away_team": pick("awayTeamAllName", "awayTeamAbbName", "awayTeamName"),
-            "kickoff_time": pick("matchDate", "matchTime"),
+            "kickoff_time": kickoff_time,
             "handicap": self._safe_handicap(pick("handicap", "letBall", "concede", "rq", "rqNum")),
             "sell_status": pick("sellStatus", "status"),
             "spf_win": pick("win", "spfWin", "winOdds"),
@@ -226,7 +240,7 @@ class HTMLFetcher:
         m2 = re.search(r"(\d{2}:\d{2})", text)
         if m2:
             return f"{issue_date} {m2.group(1)}"
-        return issue_date
+        return None
 
     def _extract_handicap_row(self, row: Any, cols: list[str]) -> str | None:
         # 1) 优先字段属性
