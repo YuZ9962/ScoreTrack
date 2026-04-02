@@ -223,12 +223,7 @@ def load_match_base_records(base_dir: Path | None = None) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
 
-    all_cols: list[str] = []
-    for frame in frames:
-        for c in frame.columns:
-            if c not in all_cols:
-                all_cols.append(c)
-    result = pd.concat([f.reindex(columns=all_cols) for f in frames], ignore_index=True)
+    result = pd.concat(frames, ignore_index=True)
     result = _ensure_mk(result)
     return result
 
@@ -491,8 +486,8 @@ def merge_match_facts(
                         df.loc[fill.index[has_value], c] = fill.loc[has_value, c]
                         filled_count += int(has_value.sum())
 
-            logger.debug(
-                "result fallback biz-key join: unmatched=%s filled_cells=%s",
+            logger.info(
+                "result fallback biz-key join: unmatched_rows=%s filled_cells=%s",
                 int(unmatched_mask.sum()),
                 filled_count,
             )
