@@ -4,6 +4,7 @@ import re
 from typing import Literal
 
 import pandas as pd
+from src.domain.match_time import infer_issue_date_from_kickoff
 
 TimeMode = Literal["按日", "按月", "按年"]
 
@@ -81,11 +82,13 @@ def ensure_issue_date_columns(df: pd.DataFrame, source_col: str = "issue_date") 
     if source_col not in out.columns:
         out[source_col] = None
 
-    base = pd.to_datetime(out[source_col], errors="coerce")
+    issue_series = out[source_col].astype("string")
     if "kickoff_time" in out.columns:
-        kickoff = pd.to_datetime(out["kickoff_time"], errors="coerce")
-        base = base.fillna(kickoff)
+        inferred = out["kickoff_time"].map(infer_issue_date_from_kickoff)
+        issue_series = issue_series.fillna(inferred)
+        issue_series = issue_series.mask(issue_series.str.strip() == "", inferred)
 
+    base = pd.to_datetime(issue_series, errors="coerce")
     out["_date"] = base.dt.strftime("%Y-%m-%d")
     out["_month"] = base.dt.strftime("%Y-%m")
     out["_year"] = base.dt.strftime("%Y")

@@ -4,10 +4,13 @@ from datetime import datetime
 from typing import Any
 
 from src.domain.match_identity import build_match_key
+from src.domain.match_time import derive_match_date, infer_issue_date_from_kickoff
 
 
 STANDARD_FIELDS = [
     "issue_date",
+    "issue_date_inferred",
+    "issue_date_source",
     "match_date",   # 实际比赛日期（≠ issue_date 销售日）
     "match_no",
     "league",
@@ -48,24 +51,25 @@ def to_bool_or_none(value: Any) -> bool | None:
 def normalize_match(record: dict[str, Any], issue_date: str, source_url: str) -> dict[str, Any]:
     normalized: dict[str, Any] = {k: None for k in STANDARD_FIELDS}
 
-    resolved_issue_date = record.get("issue_date") or issue_date
+    kickoff_time = record.get("kickoff_time")
+    source_issue_date = record.get("issue_date") or issue_date
+    inferred_issue_date = infer_issue_date_from_kickoff(kickoff_time)
+    resolved_issue_date = source_issue_date or inferred_issue_date or issue_date
 
-    # match_date: 优先用记录里已有的，其次从 kickoff_time 前10字符提取
-    match_date = record.get("match_date") or None
-    if not match_date:
-        kt = str(record.get("kickoff_time") or "").strip()
-        if len(kt) >= 10 and kt[:4].isdigit():
-            match_date = kt[:10]
+    # match_date: 实际开赛日期（自然日）
+    match_date = record.get("match_date") or derive_match_date(kickoff_time)
 
     normalized.update(
         {
             "issue_date": resolved_issue_date,
+            "issue_date_inferred": inferred_issue_date,
+            "issue_date_source": record.get("issue_date_source") or ("source" if record.get("issue_date") else ("inferred" if inferred_issue_date else "request")),
             "match_date": match_date,
             "match_no": record.get("match_no"),
             "league": record.get("league"),
             "home_team": record.get("home_team"),
             "away_team": record.get("away_team"),
-            "kickoff_time": record.get("kickoff_time"),
+            "kickoff_time": kickoff_time,
             "handicap": record.get("handicap"),
             "sell_status": record.get("sell_status"),
             "spf_win": record.get("spf_win"),
