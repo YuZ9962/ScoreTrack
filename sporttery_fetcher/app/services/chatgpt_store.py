@@ -7,10 +7,27 @@ import pandas as pd
 
 from utils.common import csv_lock, sales_day_key
 
+
+def _build_match_key(record: dict) -> str:
+    try:
+        from src.domain.match_identity import build_match_key
+        return build_match_key(record)
+    except Exception:
+        raw_id = str(record.get("raw_id") or "").strip()
+        if raw_id:
+            return f"raw:{raw_id}"
+        d = str(record.get("issue_date") or "").strip()
+        n = str(record.get("match_no") or "").strip()
+        h = str(record.get("home_team") or "").strip()
+        a = str(record.get("away_team") or "").strip()
+        return f"biz:{d}|{n}|{h}|{a}"
+
+
 CHATGPT_COLUMNS = [
     "issue_date",
     "match_no",
     "sales_day_key",
+    "match_key",    # 全局唯一比赛标识（新增，旧 CSV 无此列时向后兼容）
     "league",
     "home_team",
     "away_team",
@@ -53,6 +70,9 @@ def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
         out["sales_day_key"] = out.apply(
             lambda r: sales_day_key(r.get("issue_date"), r.get("match_no")), axis=1
         )
+    # 向后兼容旧 CSV：match_key 列不存在时按行计算
+    if "match_key" not in out.columns:
+        out["match_key"] = out.apply(lambda r: _build_match_key(r.to_dict()), axis=1)
     for c in CHATGPT_COLUMNS:
         if c not in out.columns:
             out[c] = None
@@ -75,13 +95,20 @@ def save_chatgpt_prediction(row: dict[str, Any], base_dir: Path | None = None) -
     for key in ["issue_date", "match_no", "raw_id", "home_team", "away_team"]:
         new_row[key] = str(new_row.get(key) or "").strip()
     new_row["sales_day_key"] = sales_day_key(new_row.get("issue_date"), new_row.get("match_no"))
+    # 确保 match_key 已设置
+    if not str(new_row.get("match_key") or "").strip():
+        new_row["match_key"] = _build_match_key(new_row)
 
+    key_match_key = str(new_row.get("match_key") or "").strip()
     key_raw_id = new_row.get("raw_id", "")
     key_issue_date = new_row.get("issue_date", "")
 
     with csv_lock(p):
         current = load_chatgpt_predictions(base_dir)
-        if key_raw_id:
+        # 匹配优先级：1) match_key  2) issue_date+raw_id  3) issue_date+match_no+home+away
+        if key_match_key and "match_key" in current.columns:
+            mask = ~(current["match_key"].astype(str) == key_match_key)
+        elif key_raw_id:
             mask = ~(
                 (current["issue_date"].astype(str) == key_issue_date)
                 & (current["raw_id"].astype(str) == key_raw_id)
@@ -120,7 +147,10 @@ def delete_chatgpt_predictions(matches: list[dict[str, str]], base_dir: Path | N
             match_no = str(m.get("match_no", "") or "").strip()
             home = str(m.get("home_team", "") or "").strip()
             away = str(m.get("away_team", "") or "").strip()
-            if raw_id:
+            mk = str(m.get("match_key") or _build_match_key(m)).strip()
+            if mk and "match_key" in df.columns:
+                keep_mask &= ~(df["match_key"].astype(str) == mk)
+            elif raw_id:
                 keep_mask &= ~(
                     (df["issue_date"].astype(str) == issue_date)
                     & (df["raw_id"].astype(str) == raw_id)

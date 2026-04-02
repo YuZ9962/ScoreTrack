@@ -3,9 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from src.domain.match_identity import build_match_key
+
 
 STANDARD_FIELDS = [
     "issue_date",
+    "match_date",   # 实际比赛日期（≠ issue_date 销售日）
     "match_no",
     "league",
     "home_team",
@@ -27,6 +30,7 @@ STANDARD_FIELDS = [
     "source_url",
     "scrape_time",
     "raw_id",
+    "match_key",    # 全局唯一比赛标识，由 match_identity 模块生成
 ]
 
 
@@ -43,9 +47,20 @@ def to_bool_or_none(value: Any) -> bool | None:
 
 def normalize_match(record: dict[str, Any], issue_date: str, source_url: str) -> dict[str, Any]:
     normalized: dict[str, Any] = {k: None for k in STANDARD_FIELDS}
+
+    resolved_issue_date = record.get("issue_date") or issue_date
+
+    # match_date: 优先用记录里已有的，其次从 kickoff_time 前10字符提取
+    match_date = record.get("match_date") or None
+    if not match_date:
+        kt = str(record.get("kickoff_time") or "").strip()
+        if len(kt) >= 10 and kt[:4].isdigit():
+            match_date = kt[:10]
+
     normalized.update(
         {
-            "issue_date": record.get("issue_date") or issue_date,
+            "issue_date": resolved_issue_date,
+            "match_date": match_date,
             "match_no": record.get("match_no"),
             "league": record.get("league"),
             "home_team": record.get("home_team"),
@@ -69,6 +84,8 @@ def normalize_match(record: dict[str, Any], issue_date: str, source_url: str) ->
             "raw_id": record.get("raw_id"),
         }
     )
+    # match_key 最后计算，确保所有字段已填充
+    normalized["match_key"] = record.get("match_key") or build_match_key(normalized)
     return normalized
 
 

@@ -1088,8 +1088,41 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
     deduped = _dedup_records(all_rows)
     logger.info("去重后比赛数=%s", len(deduped))
 
-    filtered = [r for r in deduped if str(r.get("match_date", "")).strip() == issue_date]
-    logger.info("match_date=%s 精确过滤后比赛数=%s", issue_date, len(filtered))
+    # ── 过滤策略 ──────────────────────────────────────────────────────────────
+    # issue_date = 销售日，match_date = 实际比赛日期，两者不一定相等。
+    # 例如：销售日 2026-04-01 的竞彩可以包含当天晚上或次日凌晨开踢的比赛。
+    # 旧的 match_date == issue_date 硬过滤会把跨自然日比赛全部丢弃，已确认为 bug。
+    #
+    # 新策略：
+    # 1. 页面已按 issue_date 查询，返回的记录属于该期销售窗口，不再按 match_date 精确过滤。
+    # 2. 宽松保留：match_date 在 issue_date 前后 3 天以内的记录（含空 match_date）。
+    #    这可以防止分页抓取到其它期的溢出数据，同时不丢弃跨日比赛。
+    from datetime import date as _date, timedelta as _timedelta
+    try:
+        target_dt = _date.fromisoformat(issue_date)
+        window_start = (target_dt - _timedelta(days=1)).isoformat()
+        window_end = (target_dt + _timedelta(days=3)).isoformat()
+    except ValueError:
+        window_start = window_end = issue_date
+
+    filtered: list[dict[str, str]] = []
+    for r in deduped:
+        md = str(r.get("match_date", "") or "").strip()
+        if not md:
+            # match_date 为空时保留（无法判断，宁可保留）
+            filtered.append(r)
+        elif window_start <= md <= window_end:
+            filtered.append(r)
+        else:
+            logger.debug(
+                "过滤超窗口记录 match_date=%s issue_date=%s match_no=%s",
+                md, issue_date, r.get("match_no", ""),
+            )
+
+    logger.info(
+        "宽松窗口过滤 issue_date=%s window=[%s, %s] 过滤前=%s 过滤后=%s",
+        issue_date, window_start, window_end, len(deduped), len(filtered),
+    )
     if not filtered:
         logger.info("日期 %s 无可用赛果（可能当日无竞彩足球赛事）", issue_date)
 
