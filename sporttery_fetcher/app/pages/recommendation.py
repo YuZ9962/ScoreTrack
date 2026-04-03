@@ -10,6 +10,8 @@ APP_DIR = Path(__file__).resolve().parents[1]
 ROOT = APP_DIR.parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from components.recommendation_card import render_recommendation_card
 from components.strategy_detail_panel import render_strategy_detail_panel

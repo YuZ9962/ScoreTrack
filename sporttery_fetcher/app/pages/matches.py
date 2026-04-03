@@ -9,6 +9,8 @@ APP_DIR = Path(__file__).resolve().parents[1]
 ROOT = APP_DIR.parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from components.data_controls import render_date_file_selector, render_fetch_section
 from components.filters import render_sidebar_filters
