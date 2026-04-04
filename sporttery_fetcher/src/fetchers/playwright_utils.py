@@ -14,7 +14,7 @@ def managed_playwright() -> Generator[Any, None, None]:
     NotImplementedError。需要在进入前先设置 WindowsSelectorEventLoopPolicy。
     """
     if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
