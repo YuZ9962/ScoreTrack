@@ -427,12 +427,12 @@ class ResultFetcher:
 
     def _fetch_with_playwright_html_for_date(self, page_url: str, issue_date: str) -> tuple[str | None, bool]:
         try:
-            from playwright.sync_api import sync_playwright
+            from src.fetchers.playwright_utils import managed_playwright
         except Exception:
             logger.warning("Playwright 不可用，无法进行按日期渲染")
             return None, False
 
-        with sync_playwright() as p:
+        with managed_playwright() as p:
             browser = p.chromium.launch(headless=settings.playwright_headless)
             context = browser.new_context(user_agent=settings.user_agent)
             page = context.new_page()
@@ -450,7 +450,7 @@ class ResultFetcher:
 
     def _detect_api_rows_for_date(self, page_url: str, issue_date: str) -> tuple[list[dict[str, str | None]], int]:
         try:
-            from playwright.sync_api import sync_playwright
+            from src.fetchers.playwright_utils import managed_playwright
         except Exception:
             logger.warning("Playwright 不可用，无法进行 XHR/JSON 探测")
             return [], 0
@@ -458,7 +458,7 @@ class ResultFetcher:
         candidates = 0
         rows: list[dict[str, str | None]] = []
 
-        with sync_playwright() as p:
+        with managed_playwright() as p:
             browser = p.chromium.launch(headless=settings.playwright_headless)
             context = browser.new_context(user_agent=settings.user_agent)
             page = context.new_page()

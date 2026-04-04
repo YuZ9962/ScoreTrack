@@ -16,13 +16,13 @@ class InterfaceDetector:
 
     def detect(self, target_url: str) -> list[dict[str, Any]]:
         try:
-            from playwright.sync_api import sync_playwright
+            from src.fetchers.playwright_utils import managed_playwright
         except Exception as exc:
             raise RuntimeError("请先安装 playwright 并执行 playwright install chromium") from exc
 
         discovered: list[dict[str, Any]] = []
 
-        with sync_playwright() as p:
+        with managed_playwright() as p:
             browser = p.chromium.launch(headless=settings.playwright_headless)
             context = browser.new_context(user_agent=settings.user_agent)
             page = context.new_page()

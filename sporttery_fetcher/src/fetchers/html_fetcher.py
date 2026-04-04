@@ -329,13 +329,13 @@ class HTMLFetcher:
 
     def _fetch_with_playwright(self, issue_date: str) -> tuple[list[dict[str, Any]], str | None]:
         try:
-            from playwright.sync_api import sync_playwright
+            from src.fetchers.playwright_utils import managed_playwright
         except Exception:
             logger.error("Playwright 未安装：请先执行 playwright install chromium")
             return [], None
 
         try:
-            with sync_playwright() as p:
+            with managed_playwright() as p:
                 browser = p.chromium.launch(headless=settings.playwright_headless)
                 context = browser.new_context(user_agent=settings.user_agent)
                 page = context.new_page()

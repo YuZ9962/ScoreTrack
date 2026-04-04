@@ -934,7 +934,7 @@ def fetch_zqsgkj_matches(issue_date: str) -> list[dict[str, str]]:
 
 
 def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str]]:
-    from playwright.sync_api import sync_playwright
+    from src.fetchers.playwright_utils import managed_playwright
 
     start_date = issue_date
     end_date = (datetime.strptime(issue_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
@@ -944,7 +944,7 @@ def _fetch_zqsgkj_from_url(issue_date: str, base_url: str) -> list[dict[str, str
 
     all_rows: list[dict[str, str]] = []
 
-    with sync_playwright() as p:
+    with managed_playwright() as p:
         browser = p.chromium.launch(headless=settings.playwright_headless)
         context = browser.new_context(user_agent=settings.user_agent)
         page = context.new_page()
