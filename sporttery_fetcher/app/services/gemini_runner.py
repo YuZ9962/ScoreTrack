@@ -4,12 +4,7 @@ import logging
 import os
 from typing import Any
 
-from google import genai
-
-try:
-    from google.genai import types as genai_types
-except Exception:  # pragma: no cover
-    genai_types = None
+import requests
 
 from utils.common import now_iso
 
@@ -18,6 +13,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "gemini-3-flash-preview"
 DEFAULT_THINKING_LEVEL = "high"
 ALLOWED_THINKING_LEVELS = {"minimal", "low", "medium", "high"}
+
+_THINKING_BUDGETS = {
+    "minimal": 512,
+    "low": 1024,
+    "medium": 8192,
+    "high": 24576,
+}
+
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def _resolve_model() -> str:
@@ -32,32 +36,6 @@ def _resolve_thinking_level() -> str:
     return DEFAULT_THINKING_LEVEL
 
 
-def _build_client() -> tuple[genai.Client | None, str | None]:
-    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
-    if not api_key:
-        return None, "未配置 GEMINI_API_KEY"
-
-    try:
-        return genai.Client(api_key=api_key, http_options={"timeout": 10}), None
-    except Exception:
-        logger.exception("初始化 Gemini 客户端失败")
-        return None, "Gemini 请求失败，请检查模型配置或 API key"
-
-
-def _is_thinking_config_error(exc: Exception) -> bool:
-    text = f"{type(exc).__name__}: {exc}".lower()
-    keywords = ["thinking_config", "extra inputs are not permitted", "extra_forbidden", "validationerror"]
-    return any(k in text for k in keywords)
-
-
-def _build_thinking_config(thinking_level: str):
-    if genai_types is None:
-        raise RuntimeError("google.genai.types 不可用")
-    return genai_types.GenerateContentConfig(
-        thinking_config=genai_types.ThinkingConfig(thinking_level=thinking_level)
-    )
-
-
 def _make_result(
     ok: bool,
     *,
@@ -68,7 +46,6 @@ def _make_result(
     text: str,
     error: str,
 ) -> dict[str, Any]:
-    """Build a uniform result dict for all Gemini call paths."""
     return {
         "ok": ok,
         "model": model,
@@ -81,46 +58,63 @@ def _make_result(
     }
 
 
+def _extract_text(data: dict) -> str:
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return ""
+    parts = candidates[0].get("content", {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts if "text" in p).strip()
+
+
+def _call_rest(model: str, api_key: str, prompt: str, with_thinking: bool, thinking_level: str) -> str:
+    url = _GEMINI_URL.format(model=model)
+    body: dict[str, Any] = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    if with_thinking:
+        budget = _THINKING_BUDGETS.get(thinking_level, 8192)
+        body["generationConfig"] = {
+            "thinkingConfig": {"thinkingBudget": budget}
+        }
+    resp = requests.post(url, params={"key": api_key}, json=body, timeout=60)
+    resp.raise_for_status()
+    return _extract_text(resp.json())
+
+
 def run_gemini_prediction(prompt: str) -> dict[str, Any]:
     model = _resolve_model()
     thinking_level = _resolve_thinking_level()
 
-    client, err = _build_client()
-    if err:
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        return _make_result(False, model=model, thinking_level=thinking_level,
+                            thinking_applied=False, prompt=prompt, text="",
+                            error="未配置 GEMINI_API_KEY")
+
+    # 第一次：带 thinking 调用
+    try:
+        text = _call_rest(model, api_key, prompt, with_thinking=True, thinking_level=thinking_level)
+        if text:
+            return _make_result(True, model=model, thinking_level=thinking_level,
+                                thinking_applied=True, prompt=prompt, text=text, error="")
+        logger.warning("Gemini（thinking 模式）返回为空，回退无 thinking 模式")
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code in (400, 422):
+            logger.warning("Gemini thinking_config 不兼容（%s），自动回退无 thinking 模式", exc.response.status_code)
+        else:
+            err = _http_error_msg(exc)
+            logger.exception("Gemini（thinking 模式）请求失败")
+            return _make_result(False, model=model, thinking_level=thinking_level,
+                                thinking_applied=False, prompt=prompt, text="", error=err)
+    except Exception as exc:
+        err = _exc_msg(exc)
+        logger.exception("Gemini（thinking 模式）请求失败")
         return _make_result(False, model=model, thinking_level=thinking_level,
                             thinking_applied=False, prompt=prompt, text="", error=err)
 
+    # 回退：不带 thinking
     try:
-        config = _build_thinking_config(thinking_level)
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=config,
-        )
-        text = (response.text or "").strip()
-        if not text:
-            return _make_result(False, model=model, thinking_level=thinking_level,
-                                thinking_applied=True, prompt=prompt, text="",
-                                error="Gemini 返回为空")
-        return _make_result(True, model=model, thinking_level=thinking_level,
-                            thinking_applied=True, prompt=prompt, text=text, error="")
-    except Exception as exc:
-        if _is_thinking_config_error(exc):
-            logger.warning("Gemini thinking_config 不兼容，自动回退无 thinking 模式: %s", type(exc).__name__)
-        else:
-            exc_name = type(exc).__name__.lower()
-            if "timeout" in exc_name or "connect" in exc_name:
-                err_msg = f"Gemini 网络超时（{type(exc).__name__}），请检查网络连接或代理设置"
-            else:
-                err_msg = "Gemini 请求失败，请检查模型配置或 API key"
-            logger.exception("Gemini（thinking 模式）请求失败")
-            return _make_result(False, model=model, thinking_level=thinking_level,
-                                thinking_applied=False, prompt=prompt, text="",
-                                error=err_msg)
-
-    try:
-        response = client.models.generate_content(model=model, contents=prompt)
-        text = (response.text or "").strip()
+        text = _call_rest(model, api_key, prompt, with_thinking=False, thinking_level=thinking_level)
         if not text:
             return _make_result(False, model=model, thinking_level=thinking_level,
                                 thinking_applied=False, prompt=prompt, text="",
@@ -128,12 +122,24 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
         return _make_result(True, model=model, thinking_level=thinking_level,
                             thinking_applied=False, prompt=prompt, text=text, error="")
     except Exception as exc:
-        exc_name = type(exc).__name__.lower()
-        if "timeout" in exc_name or "connect" in exc_name:
-            err_msg = f"Gemini 网络超时（{type(exc).__name__}），请检查网络连接或代理设置"
-        else:
-            err_msg = "Gemini 请求失败，请检查模型配置或 API key"
+        err = _exc_msg(exc)
         logger.exception("Gemini（回退无 thinking 模式）请求失败")
         return _make_result(False, model=model, thinking_level=thinking_level,
-                            thinking_applied=False, prompt=prompt, text="",
-                            error=err_msg)
+                            thinking_applied=False, prompt=prompt, text="", error=err)
+
+
+def _http_error_msg(exc: requests.HTTPError) -> str:
+    if exc.response is not None:
+        try:
+            detail = exc.response.json().get("error", {}).get("message", "")
+        except Exception:
+            detail = exc.response.text[:200]
+        return f"Gemini API 错误 {exc.response.status_code}：{detail}"
+    return f"Gemini HTTP 错误：{exc}"
+
+
+def _exc_msg(exc: Exception) -> str:
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "connect" in name:
+        return f"Gemini 网络超时（{type(exc).__name__}），请检查网络连接"
+    return f"Gemini 请求失败：{type(exc).__name__}"
