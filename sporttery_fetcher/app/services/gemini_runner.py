@@ -38,7 +38,7 @@ def _build_client() -> tuple[genai.Client | None, str | None]:
         return None, "未配置 GEMINI_API_KEY"
 
     try:
-        return genai.Client(api_key=api_key), None
+        return genai.Client(api_key=api_key, http_options={"timeout": 10}), None
     except Exception:
         logger.exception("初始化 Gemini 客户端失败")
         return None, "Gemini 请求失败，请检查模型配置或 API key"
@@ -108,10 +108,15 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
         if _is_thinking_config_error(exc):
             logger.warning("Gemini thinking_config 不兼容，自动回退无 thinking 模式: %s", type(exc).__name__)
         else:
+            exc_name = type(exc).__name__.lower()
+            if "timeout" in exc_name or "connect" in exc_name:
+                err_msg = f"Gemini 网络超时（{type(exc).__name__}），请检查网络连接或代理设置"
+            else:
+                err_msg = "Gemini 请求失败，请检查模型配置或 API key"
             logger.exception("Gemini（thinking 模式）请求失败")
             return _make_result(False, model=model, thinking_level=thinking_level,
                                 thinking_applied=False, prompt=prompt, text="",
-                                error="Gemini 请求失败，请检查模型配置或 API key")
+                                error=err_msg)
 
     try:
         response = client.models.generate_content(model=model, contents=prompt)
@@ -122,8 +127,13 @@ def run_gemini_prediction(prompt: str) -> dict[str, Any]:
                                 error="Gemini 返回为空")
         return _make_result(True, model=model, thinking_level=thinking_level,
                             thinking_applied=False, prompt=prompt, text=text, error="")
-    except Exception:
+    except Exception as exc:
+        exc_name = type(exc).__name__.lower()
+        if "timeout" in exc_name or "connect" in exc_name:
+            err_msg = f"Gemini 网络超时（{type(exc).__name__}），请检查网络连接或代理设置"
+        else:
+            err_msg = "Gemini 请求失败，请检查模型配置或 API key"
         logger.exception("Gemini（回退无 thinking 模式）请求失败")
         return _make_result(False, model=model, thinking_level=thinking_level,
                             thinking_applied=False, prompt=prompt, text="",
-                            error="Gemini 请求失败，请检查模型配置或 API key")
+                            error=err_msg)

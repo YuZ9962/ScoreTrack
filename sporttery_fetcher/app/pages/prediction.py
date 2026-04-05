@@ -476,7 +476,7 @@ with col_b:
         target_df = filtered_df.copy()
         if only_missing and not pred_df.empty:
             target_df = target_df[
-                target_df.apply(lambda r: _get_prediction_row(pred_df, selected_date, r) is None, axis=1)
+                target_df.apply(lambda r: _is_pending_or_failed(_get_prediction_row(pred_df, selected_date, r)), axis=1)
             ]
 
         total = len(target_df)
