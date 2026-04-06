@@ -12,7 +12,7 @@ ROOT = APP_DIR.parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from services.article_store import save_article, update_wechat_upload_status
+from services.article_store import load_articles, save_article, update_wechat_upload_status
 from services.loader import get_data_context, load_gemini_predictions_by_date, load_matches_by_date
 from services.transforms import normalize_dataframe
 from services.wechat_api import create_draft, has_wechat_config
@@ -149,6 +149,7 @@ if st.button("一键生成公众号文案", type="primary"):
                     **record,
                     "prompt": result.get("prompt", ""),
                     "source_gemini": gemini_dict,
+                    "source_match": match_dict,
                     "csv_path": str(csv_path),
                     "md_path": str(md_path),
                 }
@@ -168,39 +169,69 @@ if st.button("批量上传今天生成的全部文章到草稿", disabled=not ha
     if not enable_upload:
         st.warning("WECHAT_ENABLE_DRAFT_UPLOAD=false，已禁用上传")
     else:
-        updated = []
-        for article in st.session_state.get("wechat_articles", []):
-            r = create_draft(
-                title=article.get("article_title", ""),
-                content=article.get("article_body", ""),
-                author=author,
-                digest=digest,
-                thumb_media_id=None,
-                base_dir=ROOT,
-            )
-            if r.get("ok"):
-                article["wechat_upload_status"] = "已上传草稿"
-                article["wechat_draft_id"] = r.get("draft_id")
-                article["wechat_uploaded_at"] = r.get("uploaded_at")
-                article["wechat_error_message"] = ""
-            else:
-                article["wechat_upload_status"] = "上传失败"
-                article["wechat_error_message"] = r.get("error", "")
+        # 合并 session 文章 + CSV 中当天未上传的文章
+        csv_articles = load_articles(ROOT)
+        pending_from_csv = []
+        if not csv_articles.empty:
+            day_mask = csv_articles["issue_date"].astype(str) == str(selected_date)
+            unuploaded_mask = csv_articles["wechat_upload_status"].astype(str).isin(["未上传", "上传失败", "nan", ""])
+            pending_rows = csv_articles[day_mask & unuploaded_mask]
+            pending_from_csv = pending_rows.to_dict("records")
 
-            update_wechat_upload_status(
-                issue_date=str(article.get("issue_date", "")),
-                match_no=str(article.get("match_no", "")),
-                home_team=str(article.get("home_team", "")),
-                away_team=str(article.get("away_team", "")),
-                status=article.get("wechat_upload_status", "未上传"),
-                draft_id=article.get("wechat_draft_id"),
-                uploaded_at=article.get("wechat_uploaded_at") or datetime.now(timezone.utc).isoformat(),
-                error_message=article.get("wechat_error_message"),
-                base_dir=ROOT,
-            )
-            updated.append(article)
-        st.session_state["wechat_articles"] = updated
-        st.success("批量上传流程已完成，请查看每篇文章状态")
+        session_articles = st.session_state.get("wechat_articles", [])
+        # 用 (match_no, home_team, away_team) 去重，session 优先（含最新正文）
+        seen = {(a.get("match_no"), a.get("home_team"), a.get("away_team")) for a in session_articles}
+        for row in pending_from_csv:
+            key = (row.get("match_no"), row.get("home_team"), row.get("away_team"))
+            if key not in seen:
+                session_articles.append(row)
+                seen.add(key)
+
+        if not session_articles:
+            st.warning("当天暂无待上传文章，请先生成文案")
+        else:
+            success_count, fail_count = 0, 0
+            updated = []
+            for article in session_articles:
+                if str(article.get("wechat_upload_status", "")) == "已上传草稿":
+                    updated.append(article)
+                    continue
+                r = create_draft(
+                    title=article.get("article_title", ""),
+                    content=article.get("article_body", ""),
+                    author=author,
+                    digest=digest,
+                    thumb_media_id=None,
+                    base_dir=ROOT,
+                )
+                if r.get("ok"):
+                    article["wechat_upload_status"] = "已上传草稿"
+                    article["wechat_draft_id"] = r.get("draft_id")
+                    article["wechat_uploaded_at"] = r.get("uploaded_at")
+                    article["wechat_error_message"] = ""
+                    success_count += 1
+                else:
+                    article["wechat_upload_status"] = "上传失败"
+                    article["wechat_error_message"] = r.get("error", "")
+                    fail_count += 1
+
+                update_wechat_upload_status(
+                    issue_date=str(article.get("issue_date", "")),
+                    match_no=str(article.get("match_no", "")),
+                    home_team=str(article.get("home_team", "")),
+                    away_team=str(article.get("away_team", "")),
+                    status=article.get("wechat_upload_status", "未上传"),
+                    draft_id=article.get("wechat_draft_id"),
+                    uploaded_at=article.get("wechat_uploaded_at") or datetime.now(timezone.utc).isoformat(),
+                    error_message=article.get("wechat_error_message"),
+                    base_dir=ROOT,
+                )
+                updated.append(article)
+            st.session_state["wechat_articles"] = updated
+            if fail_count == 0:
+                st.success(f"批量上传完成：{success_count} 篇成功")
+            else:
+                st.warning(f"批量上传完成：{success_count} 篇成功，{fail_count} 篇失败，请查看错误信息")
 
 st.markdown("---")
 st.markdown("### 生成结果")
@@ -217,7 +248,7 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
         if article.get("wechat_error_message"):
             st.error(f"上传失败：{article.get('wechat_error_message')}")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.download_button(
                 "导出 Markdown",
@@ -282,6 +313,25 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                             base_dir=ROOT,
                         )
                         st.error(f"上传失败：{r.get('error')}")
+
+        with col4:
+            if st.button("重新生成", key=f"regen_{i}"):
+                match_d = article.get("source_match") or {}
+                gemini_d = article.get("source_gemini") or {}
+                with st.spinner("重新生成中..."):
+                    new_result = generate_wechat_article(match_d, gemini_d)
+                if new_result.get("ok"):
+                    articles = st.session_state["wechat_articles"]
+                    articles[i - 1]["article_title"] = new_result.get("article_title", "")
+                    articles[i - 1]["article_body"] = new_result.get("article_body", "")
+                    articles[i - 1]["source_model"] = new_result.get("source_model", "")
+                    articles[i - 1]["wechat_upload_status"] = "未上传"
+                    articles[i - 1]["wechat_draft_id"] = None
+                    save_article(articles[i - 1], ROOT)
+                    st.success("重新生成成功")
+                    st.rerun()
+                else:
+                    st.error(f"重新生成失败：{new_result.get('error', '')}")
 
         st.caption(f"保存位置：CSV {article.get('csv_path')} | MD {article.get('md_path')}")
         with st.expander("查看原始 Gemini 分析素材", expanded=False):
