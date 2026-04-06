@@ -329,15 +329,14 @@ class HTMLFetcher:
 
     def _fetch_with_playwright(self, issue_date: str) -> tuple[list[dict[str, Any]], str | None]:
         try:
-            from src.fetchers.playwright_utils import managed_playwright
+            from src.fetchers.playwright_utils import managed_playwright, stealth_browser_context
         except Exception:
             logger.error("Playwright 未安装：请先执行 playwright install chromium")
             return [], None
 
         try:
             with managed_playwright() as p:
-                browser = p.chromium.launch(headless=settings.playwright_headless)
-                context = browser.new_context(user_agent=settings.user_agent)
+                browser, context = stealth_browser_context(p, settings.playwright_headless, settings.user_agent)
                 page = context.new_page()
                 for url in settings.schedule_urls + settings.mobile_urls:
                     page.goto(url, wait_until="networkidle", timeout=settings.request_timeout * 1000)

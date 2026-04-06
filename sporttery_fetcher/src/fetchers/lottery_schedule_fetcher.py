@@ -256,7 +256,7 @@ def fetch_lottery_schedule(issue_date: str) -> list[dict[str, str]]:
 
     返回字段兼容 data/processed/YYYY-MM-DD_matches.csv schema。
     """
-    from src.fetchers.playwright_utils import managed_playwright
+    from src.fetchers.playwright_utils import managed_playwright, stealth_browser_context
 
     source_url = settings.lottery_schedule_url
     start_date = issue_date
@@ -267,8 +267,7 @@ def fetch_lottery_schedule(issue_date: str) -> list[dict[str, str]]:
     all_rows: list[dict[str, str]] = []
 
     with managed_playwright() as p:
-        browser = p.chromium.launch(headless=settings.playwright_headless)
-        context = browser.new_context(user_agent=settings.user_agent)
+        browser, context = stealth_browser_context(p, settings.playwright_headless, settings.user_agent)
         page = context.new_page()
 
         try:

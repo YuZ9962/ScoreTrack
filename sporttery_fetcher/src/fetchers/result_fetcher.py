@@ -427,14 +427,13 @@ class ResultFetcher:
 
     def _fetch_with_playwright_html_for_date(self, page_url: str, issue_date: str) -> tuple[str | None, bool]:
         try:
-            from src.fetchers.playwright_utils import managed_playwright
+            from src.fetchers.playwright_utils import managed_playwright, stealth_browser_context
         except Exception:
             logger.warning("Playwright 不可用，无法进行按日期渲染")
             return None, False
 
         with managed_playwright() as p:
-            browser = p.chromium.launch(headless=settings.playwright_headless)
-            context = browser.new_context(user_agent=settings.user_agent)
+            browser, context = stealth_browser_context(p, settings.playwright_headless, settings.user_agent)
             page = context.new_page()
             changed = False
             try:
@@ -450,7 +449,7 @@ class ResultFetcher:
 
     def _detect_api_rows_for_date(self, page_url: str, issue_date: str) -> tuple[list[dict[str, str | None]], int]:
         try:
-            from src.fetchers.playwright_utils import managed_playwright
+            from src.fetchers.playwright_utils import managed_playwright, stealth_browser_context
         except Exception:
             logger.warning("Playwright 不可用，无法进行 XHR/JSON 探测")
             return [], 0
@@ -459,8 +458,7 @@ class ResultFetcher:
         rows: list[dict[str, str | None]] = []
 
         with managed_playwright() as p:
-            browser = p.chromium.launch(headless=settings.playwright_headless)
-            context = browser.new_context(user_agent=settings.user_agent)
+            browser, context = stealth_browser_context(p, settings.playwright_headless, settings.user_agent)
             page = context.new_page()
 
             def on_response(resp):
