@@ -149,6 +149,10 @@ def render_template(template_html: str, fields: dict[str, str]) -> str:
         1,
     )
 
+    # 10. 移除末尾包含 <img> 的 section（图片来自其他文章素材库，API 提交会触发 40007）
+    #     保留文字内容，图片可在微信后台手动补充
+    html = re.sub(r'<section[^>]*>\s*<section[^>]*>\s*<span[^>]*><img[^>]+></span>\s*</section>\s*</section>', '', html)
+
     return html
 
 

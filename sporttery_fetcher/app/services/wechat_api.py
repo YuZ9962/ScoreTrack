@@ -16,6 +16,7 @@ TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/token"
 DRAFT_ADD_URL = "https://api.weixin.qq.com/cgi-bin/draft/add"
 DRAFT_BATCHGET_URL = "https://api.weixin.qq.com/cgi-bin/draft/batchget"
 MATERIAL_UPLOAD_URL = "https://api.weixin.qq.com/cgi-bin/material/add_material"
+MATERIAL_BATCHGET_URL = "https://api.weixin.qq.com/cgi-bin/material/batchget_material"
 
 
 def _token_cache_file(base_dir: Path | None = None) -> Path:
@@ -126,6 +127,21 @@ def upload_image_material(file_path: str, base_dir: Path | None = None) -> dict[
     }
 
 
+def _truncate_to_bytes(s: str, max_bytes: int) -> str:
+    """截断字符串使其 UTF-8 编码不超过 max_bytes 字节。"""
+    encoded = s.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return s
+    truncated = encoded[:max_bytes]
+    # 避免截断多字节字符中间
+    return truncated.decode("utf-8", errors="ignore")
+
+
+# 微信草稿API对个人订阅号的字段字节上限
+_TITLE_MAX_BYTES = 30
+_AUTHOR_MAX_BYTES = 6
+
+
 def _build_article_payload(
     *,
     title: str,
@@ -134,9 +150,11 @@ def _build_article_payload(
     digest: str,
     thumb_media_id: str | None,
 ) -> dict[str, Any]:
+    safe_title = _truncate_to_bytes(title, _TITLE_MAX_BYTES)
+    safe_author = _truncate_to_bytes(author, _AUTHOR_MAX_BYTES)
     article = {
-        "title": title,
-        "author": author,
+        "title": safe_title,
+        "author": safe_author,
         "digest": digest,
         "content": content,
         "content_source_url": "",
@@ -146,6 +164,28 @@ def _build_article_payload(
     if thumb_media_id:
         article["thumb_media_id"] = thumb_media_id
     return {"articles": [article]}
+
+
+def get_default_thumb_media_id(base_dir: Path | None = None) -> str:
+    """从永久素材图片列表取第一张的 media_id，用作草稿封面。"""
+    token_res = get_access_token(base_dir)
+    if not token_res.get("ok"):
+        return ""
+    token = token_res["access_token"]
+    try:
+        resp = requests.post(
+            MATERIAL_BATCHGET_URL,
+            params={"access_token": token},
+            json={"type": "image", "offset": 0, "count": 1},
+            timeout=15,
+        )
+        data = resp.json()
+        items = data.get("item", [])
+        if items:
+            return str(items[0].get("media_id", "") or "")
+    except Exception:
+        logger.exception("获取默认封面 media_id 失败")
+    return ""
 
 
 def create_draft(
@@ -160,6 +200,10 @@ def create_draft(
     token_res = get_access_token(base_dir)
     if not token_res.get("ok"):
         return {"ok": False, "error": token_res.get("error", "token 获取失败")}
+
+    # thumb_media_id 是必填字段，若未提供则自动从素材库取第一张图片
+    if not thumb_media_id:
+        thumb_media_id = get_default_thumb_media_id(base_dir) or None
 
     token = token_res["access_token"]
     payload = _build_article_payload(
