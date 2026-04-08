@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from config.settings import settings
 from src.utils.http import HTTPClient
 from src.utils.logger import get_logger
-from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches
+from src.fetchers.fetcher_500_results import fetch_500_results
 from src.services.result_cleaner import append_raw_results
 from src.domain.match_identity import build_match_key
 from src.domain.match_time import derive_match_date, infer_issue_date_from_kickoff, kickoff_belongs_to_issue_date
@@ -492,7 +492,7 @@ class ResultFetcher:
         return rows, candidates
 
     def _convert_zqsgkj_row(self, row: dict[str, str]) -> dict[str, str | None]:
-        score = str(row.get("full_score") or "").strip()
+        score = str(row.get("full_time_score") or row.get("full_score") or "").strip()
         handicap = str(row.get("handicap") or "").strip() or None
         result_row: dict[str, str | None] = {
             "issue_date": str(row.get("issue_date") or ""),
@@ -522,10 +522,10 @@ class ResultFetcher:
         mode = "none"
 
         try:
-            zqsgkj_rows = fetch_zqsgkj_matches(target_date)
-            if zqsgkj_rows:
-                rows = [self._convert_zqsgkj_row(r) for r in zqsgkj_rows]
-                mode = "zqsgkj_playwright"
+            rows_500 = fetch_500_results(target_date)
+            if rows_500:
+                rows = [self._convert_zqsgkj_row(r) for r in rows_500]
+                mode = "500com_results"
                 logger.info("赛果抓取方式=%s issue_date=%s parsed=%s", mode, target_date, len(rows))
                 deduped = {
                     (
@@ -540,7 +540,7 @@ class ResultFetcher:
                 logger.info("按日期赛果抓取完成 issue_date=%s mode=%s parsed_rows=%s dedup_rows=%s", target_date, mode, len(rows), len(out))
                 return out, 1, mode
         except Exception as exc:
-            logger.warning("zqsgkj 按日期抓取失败 issue_date=%s err=%s，回退旧逻辑", target_date, type(exc).__name__)
+            logger.warning("500.com 赛果抓取失败 issue_date=%s err=%s，回退旧逻辑", target_date, type(exc).__name__)
 
         for url in settings.result_urls:
             requested_count += 1
