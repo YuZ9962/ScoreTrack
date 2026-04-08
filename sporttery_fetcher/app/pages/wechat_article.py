@@ -136,6 +136,7 @@ if st.button("一键生成公众号文案", type="primary"):
                 "away_team": match_dict.get("away_team"),
                 "article_title": result.get("article_title"),
                 "article_body": result.get("article_body"),
+                "article_fields": result.get("article_fields") or {},
                 "generated_at": result.get("generated_at"),
                 "source_model": result.get("source_model"),
                 "source_analysis_type": "gemini",
@@ -373,6 +374,7 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                     articles = st.session_state["wechat_articles"]
                     articles[i - 1]["article_title"] = new_result.get("article_title", "")
                     articles[i - 1]["article_body"] = new_result.get("article_body", "")
+                    articles[i - 1]["article_fields"] = new_result.get("article_fields") or {}
                     articles[i - 1]["source_model"] = new_result.get("source_model", "")
                     articles[i - 1]["wechat_upload_status"] = "未上传"
                     articles[i - 1]["wechat_draft_id"] = None
