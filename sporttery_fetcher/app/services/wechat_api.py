@@ -14,6 +14,7 @@ logger = logging.getLogger("wechat_api")
 
 TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/token"
 DRAFT_ADD_URL = "https://api.weixin.qq.com/cgi-bin/draft/add"
+DRAFT_UPDATE_URL = "https://api.weixin.qq.com/cgi-bin/draft/update"
 DRAFT_BATCHGET_URL = "https://api.weixin.qq.com/cgi-bin/draft/batchget"
 MATERIAL_UPLOAD_URL = "https://api.weixin.qq.com/cgi-bin/material/add_material"
 MATERIAL_BATCHGET_URL = "https://api.weixin.qq.com/cgi-bin/material/batchget_material"
@@ -127,19 +128,19 @@ def upload_image_material(file_path: str, base_dir: Path | None = None) -> dict[
     }
 
 
-def _truncate_to_bytes(s: str, max_bytes: int) -> str:
-    """截断字符串使其 UTF-8 编码不超过 max_bytes 字节。"""
+# 经实测，个人订阅号 draft/add 和 draft/update 的字段上限（UTF-8 字节数）
+# 官方文档所标注的"32字/16字"适用于认证服务号，个人号更严
+_TITLE_MAX_BYTES = 30   # ≈ 10 个汉字
+_AUTHOR_MAX_BYTES = 6   # ≈ 2 个汉字
+_DIGEST_MAX_BYTES = 384  # 128 字 × 3 bytes，足够存完整标题
+
+
+def _truncate_bytes(s: str, max_bytes: int) -> str:
+    """按 UTF-8 字节数截断，不转 Unicode 转义，不截断多字节字符中间。"""
     encoded = s.encode("utf-8")
     if len(encoded) <= max_bytes:
         return s
-    truncated = encoded[:max_bytes]
-    # 避免截断多字节字符中间
-    return truncated.decode("utf-8", errors="ignore")
-
-
-# 微信草稿API对个人订阅号的字段字节上限
-_TITLE_MAX_BYTES = 30
-_AUTHOR_MAX_BYTES = 6
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def _build_article_payload(
@@ -150,12 +151,16 @@ def _build_article_payload(
     digest: str,
     thumb_media_id: str | None,
 ) -> dict[str, Any]:
-    safe_title = _truncate_to_bytes(title, _TITLE_MAX_BYTES)
-    safe_author = _truncate_to_bytes(author, _AUTHOR_MAX_BYTES)
+    safe_title = _truncate_bytes(title, _TITLE_MAX_BYTES)
+    safe_author = _truncate_bytes(author, _AUTHOR_MAX_BYTES)
+    # 若标题被截断，把完整标题存入 digest 供微信后台显示
+    if not digest and len(safe_title) < len(title):
+        digest = title
+    safe_digest = _truncate_bytes(digest, _DIGEST_MAX_BYTES)
     article = {
         "title": safe_title,
         "author": safe_author,
-        "digest": digest,
+        "digest": safe_digest,
         "content": content,
         "content_source_url": "",
         "need_open_comment": 0,
@@ -227,12 +232,81 @@ def create_draft(
         return {"ok": False, "error": f"创建草稿失败: {type(exc).__name__}"}
 
     media_id = str(data.get("media_id", "") or "")
-    if media_id:
-        return {"ok": True, "draft_id": media_id, "raw": data, "uploaded_at": _now_iso()}
+    if not media_id:
+        return {
+            "ok": False,
+            "error": f"创建草稿失败 errcode={data.get('errcode')} errmsg={data.get('errmsg')}",
+            "raw": data,
+        }
 
+    result: dict[str, Any] = {"ok": True, "draft_id": media_id, "raw": data, "uploaded_at": _now_iso()}
+
+    # 若标题被截断，尝试用 draft/update 写入完整标题
+    if len(title.encode("utf-8")) > _TITLE_MAX_BYTES:
+        update_res = update_draft(
+            media_id=media_id,
+            title=title,
+            content=content,
+            author=author,
+            digest=digest,
+            thumb_media_id=thumb_media_id,
+            token=token,
+        )
+        result["title_updated"] = update_res.get("ok", False)
+        result["title_update_error"] = update_res.get("error", "")
+
+    return result
+
+
+def update_draft(
+    *,
+    media_id: str,
+    title: str,
+    content: str,
+    author: str,
+    digest: str = "",
+    thumb_media_id: str | None = None,
+    token: str = "",
+    base_dir: Path | None = None,
+) -> dict[str, Any]:
+    """尝试用 draft/update 更新草稿标题（官方文档对 update 无明确字数限制）。"""
+    if not token:
+        token_res = get_access_token(base_dir)
+        if not token_res.get("ok"):
+            return {"ok": False, "error": token_res.get("error", "token 获取失败")}
+        token = token_res["access_token"]
+
+    article: dict[str, Any] = {
+        "title": _truncate_bytes(title, _TITLE_MAX_BYTES),
+        "author": _truncate_bytes(author, _AUTHOR_MAX_BYTES),
+        "content": content,
+        "content_source_url": "",
+        "need_open_comment": 0,
+        "only_fans_can_comment": 0,
+    }
+    if digest:
+        article["digest"] = _truncate_bytes(digest, _DIGEST_MAX_BYTES)
+    if thumb_media_id:
+        article["thumb_media_id"] = thumb_media_id
+
+    payload = {"media_id": media_id, "index": 0, "articles": article}
+    try:
+        resp = requests.post(
+            DRAFT_UPDATE_URL,
+            params={"access_token": token},
+            json=payload,
+            timeout=25,
+        )
+        data = resp.json()
+    except Exception as exc:
+        logger.exception("更新微信草稿失败")
+        return {"ok": False, "error": f"更新草稿失败: {type(exc).__name__}"}
+
+    if data.get("errcode") == 0 or not data.get("errcode"):
+        return {"ok": True, "raw": data}
     return {
         "ok": False,
-        "error": f"创建草稿失败 errcode={data.get('errcode')} errmsg={data.get('errmsg')}",
+        "error": f"更新草稿失败 errcode={data.get('errcode')} errmsg={data.get('errmsg')}",
         "raw": data,
     }
 
