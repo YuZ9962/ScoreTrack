@@ -441,7 +441,7 @@ else:
                     if len(content_html) > 5000:
                         st.caption(f"内容已截断，总长度 {len(content_html)} 字符")
             else:
-                st.warning("未在草稿中找到标题含"日常公众号模板"的草稿")
+                st.warning('未在草稿中找到标题含"日常公众号模板"的草稿')
                 st.markdown("**全部草稿标题：**")
                 for item in items:
                     for a in item.get("content", {}).get("news_item", []):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ ARTICLE_COLUMNS = [
     "away_team",
     "article_title",
     "article_body",
+    "article_fields",
     "generated_at",
     "source_model",
     "source_analysis_type",
@@ -39,12 +41,27 @@ def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
     return out[ARTICLE_COLUMNS]
 
 
+def _deserialize_fields(val: Any) -> dict:
+    """CSV 中的 article_fields 是 JSON 字符串，读取时反序列化为 dict。"""
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str) and val.strip():
+        try:
+            return json.loads(val)
+        except Exception:
+            return {}
+    return {}
+
+
 def load_articles(base_dir: Path | None = None) -> pd.DataFrame:
     p = article_csv_file(base_dir)
     if not p.exists():
         return pd.DataFrame(columns=ARTICLE_COLUMNS)
     try:
-        return _ensure_cols(pd.read_csv(p))
+        df = _ensure_cols(pd.read_csv(p))
+        if "article_fields" in df.columns:
+            df["article_fields"] = df["article_fields"].apply(_deserialize_fields)
+        return df
     except Exception:
         return pd.DataFrame(columns=ARTICLE_COLUMNS)
 
@@ -66,6 +83,10 @@ def save_article(record: dict[str, Any], base_dir: Path | None = None) -> tuple[
     row.setdefault("wechat_draft_id", None)
     row.setdefault("wechat_uploaded_at", None)
     row.setdefault("wechat_error_message", None)
+
+    # article_fields 是 dict，CSV 写入前序列化为 JSON 字符串
+    if isinstance(row.get("article_fields"), dict):
+        row["article_fields"] = json.dumps(row["article_fields"], ensure_ascii=False)
 
     mask = ~_match_mask(existing, row)
     merged = pd.concat([existing[mask], pd.DataFrame([row])], ignore_index=True)
