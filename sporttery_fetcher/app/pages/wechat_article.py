@@ -15,7 +15,8 @@ if str(APP_DIR) not in sys.path:
 from services.article_store import load_articles, save_article, update_wechat_upload_status
 from services.loader import get_data_context, load_gemini_predictions_by_date, load_matches_by_date
 from services.transforms import normalize_dataframe
-from services.wechat_api import create_draft, has_wechat_config
+from services.wechat_api import create_draft, has_wechat_config, list_drafts
+from services.wechat_template import build_draft_from_template
 from services.wechat_writer import generate_wechat_article
 
 st.set_page_config(page_title="公众号", page_icon="📝", layout="wide")
@@ -248,7 +249,7 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
         if article.get("wechat_error_message"):
             st.error(f"上传失败：{article.get('wechat_error_message')}")
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.download_button(
                 "导出 Markdown",
@@ -315,6 +316,54 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                         st.error(f"上传失败：{r.get('error')}")
 
         with col4:
+            if st.button("使用模板上传草稿", key=f"upload_tmpl_{i}", disabled=not has_wechat_config()):
+                fields = article.get("article_fields") or {}
+                if not fields or not fields.get("前言"):
+                    st.warning("字段未解析，请重新生成文章后再使用模板上传")
+                else:
+                    enable_upload = (os.getenv("WECHAT_ENABLE_DRAFT_UPLOAD") or "true").strip().lower() == "true"
+                    if not enable_upload:
+                        st.warning("WECHAT_ENABLE_DRAFT_UPLOAD=false，已禁用上传")
+                    else:
+                        author = (os.getenv("WECHAT_AUTHOR") or "金条玩足球").strip() or "金条玩足球"
+                        with st.spinner("拉取模板并替换字段..."):
+                            build_r = build_draft_from_template(
+                                article_title=edited_title,
+                                fields=fields,
+                                base_dir=ROOT,
+                            )
+                        if not build_r.get("ok"):
+                            st.error(f"模板渲染失败：{build_r.get('error')}")
+                        else:
+                            r = create_draft(
+                                title=edited_title,
+                                content=build_r["content_html"],
+                                author=author,
+                                digest="",
+                                thumb_media_id=None,
+                                base_dir=ROOT,
+                            )
+                            if r.get("ok"):
+                                article["wechat_upload_status"] = "已上传草稿"
+                                article["wechat_draft_id"] = r.get("draft_id")
+                                article["wechat_uploaded_at"] = r.get("uploaded_at")
+                                article["wechat_error_message"] = ""
+                                update_wechat_upload_status(
+                                    issue_date=str(article.get("issue_date", "")),
+                                    match_no=str(article.get("match_no", "")),
+                                    home_team=str(article.get("home_team", "")),
+                                    away_team=str(article.get("away_team", "")),
+                                    status="已上传草稿",
+                                    draft_id=str(r.get("draft_id", "")),
+                                    uploaded_at=str(r.get("uploaded_at", "")),
+                                    error_message="",
+                                    base_dir=ROOT,
+                                )
+                                st.success(f"模板草稿上传成功，草稿ID：{r.get('draft_id')}")
+                            else:
+                                st.error(f"上传失败：{r.get('error')}")
+
+        with col5:
             if st.button("重新生成", key=f"regen_{i}"):
                 match_d = article.get("source_match") or {}
                 gemini_d = article.get("source_gemini") or {}
@@ -334,5 +383,66 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                     st.error(f"重新生成失败：{new_result.get('error', '')}")
 
         st.caption(f"保存位置：CSV {article.get('csv_path')} | MD {article.get('md_path')}")
+        with st.expander("字段拆解（11个字段）", expanded=False):
+            fields = article.get("article_fields") or {}
+            if not fields:
+                st.caption("暂无字段数据（旧记录，请重新生成）")
+            else:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.text_area("前言", value=fields.get("前言", ""), height=100, key=f"f_preface_{i}", disabled=True)
+                    st.text_input("主队名称", value=fields.get("主队名称", ""), key=f"f_home_name_{i}", disabled=True)
+                    st.text_area("主队分析", value=fields.get("主队分析", ""), height=120, key=f"f_home_analysis_{i}", disabled=True)
+                    st.text_input("客队名称", value=fields.get("客队名称", ""), key=f"f_away_name_{i}", disabled=True)
+                    st.text_area("客队分析", value=fields.get("客队分析", ""), height=120, key=f"f_away_analysis_{i}", disabled=True)
+                with col_b:
+                    st.text_area("主基调", value=fields.get("主基调", ""), height=150, key=f"f_tone_{i}", disabled=True)
+                    st.text_input("结果（推荐）", value=fields.get("结果", ""), key=f"f_result_{i}", disabled=True)
+                    st.text_input("score1", value=fields.get("score1", ""), key=f"f_score1_{i}", disabled=True)
+                    st.text_input("score2", value=fields.get("score2", ""), key=f"f_score2_{i}", disabled=True)
+                    st.text_area("总结", value=fields.get("总结", ""), height=100, key=f"f_summary_{i}", disabled=True)
+
         with st.expander("查看原始 Gemini 分析素材", expanded=False):
             st.json(article.get("source_gemini", {}))
+
+st.markdown("---")
+st.markdown("### 微信草稿模板分析（日常公众号模板）")
+st.caption("此区块用于获取并分析微信草稿箱中的模板内容，暂不做集成改变。")
+if not has_wechat_config():
+    st.warning("未配置 WECHAT_APP_ID / WECHAT_APP_SECRET，无法获取草稿列表。")
+else:
+    if st.button("获取草稿列表（分析模板）"):
+        with st.spinner("请求微信草稿列表…"):
+            result = list_drafts(offset=0, count=20)
+        if not result.get("ok"):
+            st.error(f"获取失败：{result.get('error')}")
+        else:
+            items = result.get("items", [])
+            total = result.get("total", 0)
+            st.success(f"共 {total} 篇草稿，返回 {len(items)} 篇")
+            template_item = None
+            for item in items:
+                content_list = item.get("content", {}).get("news_item", [])
+                for article_item in content_list:
+                    if "日常公众号模板" in (article_item.get("title") or ""):
+                        template_item = article_item
+                        break
+                if template_item:
+                    break
+
+            if template_item:
+                st.success("找到模板：日常公众号模板")
+                st.markdown(f"**标题**: {template_item.get('title')}")
+                st.markdown(f"**作者**: {template_item.get('author')}")
+                st.markdown(f"**摘要**: {template_item.get('digest')}")
+                with st.expander("模板 HTML 内容（原始）", expanded=True):
+                    content_html = template_item.get("content", "")
+                    st.code(content_html[:5000] if content_html else "（空）", language="html")
+                    if len(content_html) > 5000:
+                        st.caption(f"内容已截断，总长度 {len(content_html)} 字符")
+            else:
+                st.warning("未在草稿中找到标题含"日常公众号模板"的草稿")
+                st.markdown("**全部草稿标题：**")
+                for item in items:
+                    for a in item.get("content", {}).get("news_item", []):
+                        st.markdown(f"- {a.get('title', '（无标题）')}")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -68,6 +69,67 @@ def _fallback_article(match: dict[str, Any], gemini: dict[str, Any]) -> str:
 这场球，更像是一场先拉扯、再分层的比赛。\n\n（素材摘要：{summary[:160]}）"""
 
 
+def parse_article_fields(body: str) -> dict[str, str]:
+    """Split article body into structured fields based on fixed section markers."""
+    text = (body or "").strip()
+    fields: dict[str, str] = {
+        "前言": "",
+        "主队名称": "",
+        "主队分析": "",
+        "客队名称": "",
+        "客队分析": "",
+        "主基调": "",
+        "结果": "",
+        "score1": "",
+        "score2": "",
+        "总结": "",
+    }
+
+    sec1 = re.search(r'1[\.、]\s*基本面分析', text)
+    sec2 = re.search(r'2[\.、]\s*比赛走势', text)
+    sec3 = re.search(r'3[\.、]\s*赛果预测', text)
+
+    if not sec1:
+        fields["前言"] = text
+        return fields
+
+    fields["前言"] = text[:sec1.start()].strip()
+
+    sec2_start = sec2.start() if sec2 else len(text)
+    between_12 = text[sec1.end():sec2_start].strip()
+
+    bold_iter = list(re.finditer(r'\*\*(.+?)\*\*', between_12))
+    if bold_iter:
+        hm = bold_iter[0]
+        fields["主队名称"] = hm.group(1).strip()
+        if len(bold_iter) >= 2:
+            am = bold_iter[1]
+            fields["客队名称"] = am.group(1).strip()
+            fields["主队分析"] = between_12[hm.end():am.start()].strip()
+            fields["客队分析"] = between_12[am.end():].strip()
+        else:
+            fields["主队分析"] = between_12[hm.end():].strip()
+    else:
+        fields["主队分析"] = between_12
+
+    if sec2:
+        sec3_start = sec3.start() if sec3 else len(text)
+        fields["主基调"] = text[sec2.end():sec3_start].strip()
+
+    if sec3:
+        sec3_body = text[sec3.end():].strip()
+        rec = re.search(r'推荐[：:]\s*(.+)', sec3_body)
+        if rec:
+            fields["结果"] = rec.group(1).strip()
+        score = re.search(r'比分[：:]\s*(\S+?)[,，]\s*(\S+)', sec3_body)
+        if score:
+            fields["score1"] = score.group(1).strip()
+            fields["score2"] = score.group(2).strip()
+            fields["总结"] = sec3_body[score.end():].strip()
+
+    return fields
+
+
 def generate_wechat_article(match: dict[str, Any], gemini: dict[str, Any]) -> dict[str, Any]:
     prompt = build_wechat_article_prompt(match=match, gemini=gemini)
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
@@ -80,6 +142,7 @@ def generate_wechat_article(match: dict[str, Any], gemini: dict[str, Any]) -> di
             "ok": True,
             "article_title": title,
             "article_body": body,
+            "article_fields": parse_article_fields(body),
             "source_model": "fallback_template",
             "generated_at": _now_iso(),
             "prompt": prompt,
@@ -100,6 +163,7 @@ def generate_wechat_article(match: dict[str, Any], gemini: dict[str, Any]) -> di
             "ok": True,
             "article_title": title,
             "article_body": body,
+            "article_fields": parse_article_fields(body),
             "source_model": model,
             "generated_at": _now_iso(),
             "prompt": prompt,
@@ -111,6 +175,7 @@ def generate_wechat_article(match: dict[str, Any], gemini: dict[str, Any]) -> di
             "ok": True,
             "article_title": title,
             "article_body": body,
+            "article_fields": parse_article_fields(body),
             "source_model": "fallback_template_on_error",
             "generated_at": _now_iso(),
             "prompt": prompt,

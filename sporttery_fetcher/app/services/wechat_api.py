@@ -14,6 +14,7 @@ logger = logging.getLogger("wechat_api")
 
 TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/token"
 DRAFT_ADD_URL = "https://api.weixin.qq.com/cgi-bin/draft/add"
+DRAFT_BATCHGET_URL = "https://api.weixin.qq.com/cgi-bin/draft/batchget"
 MATERIAL_UPLOAD_URL = "https://api.weixin.qq.com/cgi-bin/material/add_material"
 
 
@@ -190,6 +191,37 @@ def create_draft(
         "error": f"创建草稿失败 errcode={data.get('errcode')} errmsg={data.get('errmsg')}",
         "raw": data,
     }
+
+
+def list_drafts(offset: int = 0, count: int = 20, base_dir: Path | None = None) -> dict[str, Any]:
+    """获取草稿列表（含模板草稿）。"""
+    token_res = get_access_token(base_dir)
+    if not token_res.get("ok"):
+        return {"ok": False, "error": token_res.get("error", "token 获取失败"), "items": []}
+
+    token = token_res["access_token"]
+    try:
+        resp = requests.post(
+            DRAFT_BATCHGET_URL,
+            params={"access_token": token},
+            json={"offset": offset, "count": count, "no_content": 0},
+            timeout=25,
+        )
+        data = resp.json()
+    except Exception as exc:
+        logger.exception("获取草稿列表失败")
+        return {"ok": False, "error": f"获取草稿列表失败: {type(exc).__name__}", "items": []}
+
+    if data.get("errcode") and data.get("errcode") != 0:
+        return {
+            "ok": False,
+            "error": f"errcode={data.get('errcode')} errmsg={data.get('errmsg')}",
+            "items": [],
+            "raw": data,
+        }
+
+    items = data.get("item", [])
+    return {"ok": True, "items": items, "total": data.get("total_count", 0), "raw": data}
 
 
 # 预留接口（后续发布能力）
