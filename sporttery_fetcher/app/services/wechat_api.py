@@ -132,7 +132,7 @@ def upload_image_material(file_path: str, base_dir: Path | None = None) -> dict[
 # 官方文档所标注的"32字/16字"适用于认证服务号，个人号更严
 _TITLE_MAX_BYTES = 30   # ≈ 10 个汉字
 _AUTHOR_MAX_BYTES = 6   # ≈ 2 个汉字
-_DIGEST_MAX_BYTES = 384  # 128 字 × 3 bytes，足够存完整标题
+_DIGEST_MAX_BYTES = 120  # 40 汉字 × 3 bytes，个人订阅号实测上限
 
 
 def _truncate_bytes(s: str, max_bytes: int) -> str:
@@ -160,12 +160,13 @@ def _build_article_payload(
     article = {
         "title": safe_title,
         "author": safe_author,
-        "digest": safe_digest,
         "content": content,
         "content_source_url": "",
         "need_open_comment": 0,
         "only_fans_can_comment": 0,
     }
+    if safe_digest:
+        article["digest"] = safe_digest
     if thumb_media_id:
         article["thumb_media_id"] = thumb_media_id
     return {"articles": [article]}
@@ -217,6 +218,12 @@ def create_draft(
         author=author,
         digest=digest,
         thumb_media_id=thumb_media_id,
+    )
+    _art = payload["articles"][0]
+    logger.info(
+        "创建草稿 title_bytes=%d content_bytes=%d",
+        len(_art["title"].encode("utf-8")),
+        len(_art["content"].encode("utf-8")),
     )
 
     try:
