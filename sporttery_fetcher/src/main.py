@@ -10,6 +10,7 @@ from config.settings import settings
 from src.fetchers.api_fetcher import APIFetcher
 from src.fetchers.html_fetcher import HTMLFetcher
 from src.fetchers.mobile_fetcher import MobileFetcher
+from src.fetchers.fetcher_500 import fetch_500_matches
 from src.fetchers.lottery_schedule_fetcher import fetch_lottery_schedule
 from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches, save_zqsgkj_results
 from src.parsers.normalize import normalize_matches
@@ -37,6 +38,33 @@ def _triple_non_empty_count(records: list[dict[str, Any]], keys: tuple[str, str,
 
 def run(issue_date: str) -> dict[str, Any]:
     logger.info("开始抓取竞彩足球数据，日期=%s", issue_date)
+
+    # 0. 首选：trade.500.com/jczq（纯 HTTP，无 Playwright，速度最快）
+    try:
+        rows_500 = fetch_500_matches(issue_date)
+    except Exception as exc:
+        logger.warning("500.com 赛事抓取失败，回退后续流程 err=%s", type(exc).__name__)
+        rows_500 = []
+
+    if rows_500:
+        normalized = normalize_matches(rows_500, issue_date=issue_date, source_url="https://trade.500.com/jczq/")
+        handicap_non_empty = sum(1 for r in normalized if r.get("handicap") not in (None, ""))
+        spf_full_non_empty = _triple_non_empty_count(normalized, ("spf_win", "spf_draw", "spf_lose"))
+        rqspf_full_non_empty = _triple_non_empty_count(normalized, ("rqspf_win", "rqspf_draw", "rqspf_lose"))
+        json_path = save_json(normalized, issue_date)
+        csv_path = save_csv(normalized, issue_date)
+        logger.info("500.com 抓取成功 count=%s json=%s csv=%s", len(normalized), json_path, csv_path)
+        _try_rebuild_facts(settings.base_dir)
+        return {
+            "count": len(normalized),
+            "strategy": "500com",
+            "handicap_non_empty": handicap_non_empty,
+            "spf_full_non_empty": spf_full_non_empty,
+            "rqspf_full_non_empty": rqspf_full_non_empty,
+            "json_path": str(json_path),
+            "csv_path": str(csv_path),
+            "source_url": "https://trade.500.com/jczq/",
+        }
 
     # 1. 未开始赛程：lottery.gov.cn/jc/zqszsc（侧边栏主流程）
     try:
