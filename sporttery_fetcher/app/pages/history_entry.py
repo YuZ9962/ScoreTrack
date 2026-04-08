@@ -21,7 +21,7 @@ from services.manual_entry_store import (
     save_history_entry,
     upsert_history_fetch_results,
 )
-from src.fetchers.zqsgkj_fetcher import fetch_zqsgkj_matches
+from src.fetchers.fetcher_500_results import fetch_500_results
 
 st.set_page_config(page_title="历史补录", page_icon="🗂️", layout="wide")
 st.title("🗂️ 历史补录")
@@ -37,7 +37,7 @@ if "history_fetch_preview" not in st.session_state:
 if "history_fetch_issue_date" not in st.session_state:
     st.session_state["history_fetch_issue_date"] = _today()
 
-st.subheader("A. 按 issue_date 抓取历史赛果（官方 zqsgkj）")
+st.subheader("A. 按 issue_date 抓取历史赛果（500.com）")
 st.caption("仅用于历史补录：按竞彩编号日 issue_date 抓取并预览，再手动确认写入。")
 
 with st.form("history_fetch_form", clear_on_submit=False):
@@ -47,7 +47,7 @@ with st.form("history_fetch_form", clear_on_submit=False):
 if fetch_clicked:
     with st.spinner(f"正在抓取 {fetch_issue_date} 的历史赛果..."):
         try:
-            records = fetch_zqsgkj_matches(fetch_issue_date)
+            records = fetch_500_results(fetch_issue_date)
             st.session_state["history_fetch_preview"] = records
             st.session_state["history_fetch_issue_date"] = fetch_issue_date
             if records:
