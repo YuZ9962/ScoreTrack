@@ -76,7 +76,8 @@ def build_match_key(record: dict[str, Any]) -> str:
     2. 否则 → build_business_key(issue_date, match_no, home_team, away_team)
     """
     raw_id = str(record.get("raw_id") or "").strip()
-    if raw_id:
+    # pandas NaN 转字符串后为 "nan"，视为空
+    if raw_id and raw_id.lower() != "nan":
         # 规范化 float 表示（如 pandas concat 后 "2038791.0" → "2038791"）
         if "." in raw_id:
             try:
