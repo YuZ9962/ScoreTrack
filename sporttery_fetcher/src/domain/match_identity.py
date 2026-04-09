@@ -77,6 +77,12 @@ def build_match_key(record: dict[str, Any]) -> str:
     """
     raw_id = str(record.get("raw_id") or "").strip()
     if raw_id:
+        # 规范化 float 表示（如 pandas concat 后 "2038791.0" → "2038791"）
+        if "." in raw_id:
+            try:
+                raw_id = str(int(float(raw_id)))
+            except (ValueError, OverflowError):
+                pass
         return f"raw:{raw_id}"
     return build_business_key(
         issue_date=str(record.get("issue_date") or "").strip(),
