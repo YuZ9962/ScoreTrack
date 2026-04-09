@@ -11,8 +11,8 @@ match_identity.py
 - match_key 是全局唯一比赛标识，所有跨模块匹配必须使用它，禁止裸用 match_no
 
 match_key 格式:
-    raw:{raw_id}          当 raw_id 可靠时优先使用
-    biz:{issue_date}|{match_no}|{home_team}|{away_team}   否则用业务 key
+    {issue_date}|{match_no}   当 issue_date 和 match_no 均非空时（主格式）
+    biz:{issue_date}|{match_no}|{home_team}|{away_team}   兜底（缺少 match_no 时）
 """
 
 import re
@@ -71,23 +71,24 @@ def build_business_key(
 def build_match_key(record: dict[str, Any]) -> str:
     """从一条比赛记录构造全局唯一 match_key。
 
-    优先级：
-    1. raw_id 非空 → raw:{raw_id}
-    2. 否则 → build_business_key(issue_date, match_no, home_team, away_team)
+    格式：{issue_date}|{match_no}
+    当 issue_date 或 match_no 缺失时兜底到 biz: 四字段格式。
     """
-    raw_id = str(record.get("raw_id") or "").strip()
-    # pandas NaN 转字符串后为 "nan"，视为空
-    if raw_id and raw_id.lower() != "nan":
-        # 规范化 float 表示（如 pandas concat 后 "2038791.0" → "2038791"）
-        if "." in raw_id:
-            try:
-                raw_id = str(int(float(raw_id)))
-            except (ValueError, OverflowError):
-                pass
-        return f"raw:{raw_id}"
+    issue_date = str(record.get("issue_date") or "").strip()
+    match_no = str(record.get("match_no") or "").strip()
+    # "nan" 是 pandas NaN 转字符串的产物，视为空
+    if issue_date.lower() == "nan":
+        issue_date = ""
+    if match_no.lower() == "nan":
+        match_no = ""
+
+    if issue_date and match_no:
+        return f"{issue_date}|{match_no}"
+
+    # 兜底：缺失 issue_date 或 match_no 时用四字段 biz key
     return build_business_key(
-        issue_date=str(record.get("issue_date") or "").strip(),
-        match_no=str(record.get("match_no") or "").strip(),
+        issue_date=issue_date,
+        match_no=match_no,
         home_team=str(record.get("home_team") or ""),
         away_team=str(record.get("away_team") or ""),
     )
