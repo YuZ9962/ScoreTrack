@@ -16,6 +16,7 @@ from services.article_store import load_articles, save_article, update_wechat_up
 from services.loader import get_data_context, load_gemini_predictions_by_date, load_matches_by_date
 from services.transforms import normalize_dataframe
 from services.md2wechat_service import markdown_to_wechat_html
+from services.md2wechat_runner import STYLE_LABELS, DEFAULT_STYLE, convert_and_upload, is_available
 from services.wechat_api import create_draft, has_wechat_config, list_drafts
 from services.wechat_template import build_draft_from_template
 from services.wechat_writer import generate_wechat_article
@@ -251,6 +252,17 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
         if article.get("wechat_error_message"):
             st.error(f"上传失败：{article.get('wechat_error_message')}")
 
+        # md2wechat 主题选择（每篇独立）
+        _md2w_style_key = f"md2w_style_{i}"
+        if _md2w_style_key not in st.session_state:
+            st.session_state[_md2w_style_key] = DEFAULT_STYLE
+        selected_style = st.selectbox(
+            "md2wechat 风格",
+            options=list(STYLE_LABELS.keys()),
+            format_func=lambda k: STYLE_LABELS[k],
+            key=_md2w_style_key,
+        )
+
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         with col1:
             st.download_button(
@@ -368,26 +380,29 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                                 st.error(f"上传失败：{r.get('error')}（content {content_bytes} bytes）")
 
         with col5:
-            if st.button("富文本上传", key=f"upload_rich_{i}", disabled=not has_wechat_config()):
+            _md2w_disabled = not (has_wechat_config() and is_available())
+            _md2w_tooltip = "" if not _md2w_disabled else "需配置 WECHAT_APP_ID/SECRET 并安装 md2wechat"
+            if st.button("md2wechat 上传", key=f"upload_md2w_{i}", disabled=_md2w_disabled, help=_md2w_tooltip):
                 enable_upload = (os.getenv("WECHAT_ENABLE_DRAFT_UPLOAD") or "true").strip().lower() == "true"
                 if not enable_upload:
                     st.warning("WECHAT_ENABLE_DRAFT_UPLOAD=false，已禁用上传")
                 else:
                     author = (os.getenv("WECHAT_AUTHOR") or "金条玩足球").strip() or "金条玩足球"
-                    with st.spinner("转换为富文本 HTML 并上传..."):
-                        content_html = markdown_to_wechat_html(edited_body)
-                        r = create_draft(
+                    style = st.session_state.get(_md2w_style_key, DEFAULT_STYLE)
+                    with st.spinner(f"md2wechat 转换并上传（风格：{STYLE_LABELS.get(style, style)}）..."):
+                        r = convert_and_upload(
+                            edited_body,
                             title=edited_title,
-                            content=content_html,
                             author=author,
-                            digest="",
-                            thumb_media_id=None,
+                            style=style,
                             base_dir=ROOT,
                         )
                     if r.get("ok"):
+                        raw = r.get("raw") or {}
+                        draft_id = str(raw.get("media_id") or raw.get("draft_id") or "")
                         article["wechat_upload_status"] = "已上传草稿"
-                        article["wechat_draft_id"] = r.get("draft_id")
-                        article["wechat_uploaded_at"] = r.get("uploaded_at")
+                        article["wechat_draft_id"] = draft_id
+                        article["wechat_uploaded_at"] = datetime.now(timezone.utc).isoformat()
                         article["wechat_error_message"] = ""
                         update_wechat_upload_status(
                             issue_date=str(article.get("issue_date", "")),
@@ -395,12 +410,12 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                             home_team=str(article.get("home_team", "")),
                             away_team=str(article.get("away_team", "")),
                             status="已上传草稿",
-                            draft_id=str(r.get("draft_id", "")),
-                            uploaded_at=str(r.get("uploaded_at", "")),
+                            draft_id=draft_id,
+                            uploaded_at=article["wechat_uploaded_at"],
                             error_message="",
                             base_dir=ROOT,
                         )
-                        st.success(f"富文本上传成功，草稿ID：{r.get('draft_id')}")
+                        st.success(f"md2wechat 上传成功（{STYLE_LABELS.get(style, style)}）草稿ID：{draft_id}")
                     else:
                         article["wechat_upload_status"] = "上传失败"
                         article["wechat_error_message"] = r.get("error", "")
@@ -415,7 +430,7 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                             error_message=str(r.get("error", "")),
                             base_dir=ROOT,
                         )
-                        st.error(f"上传失败：{r.get('error')}")
+                        st.error(f"md2wechat 上传失败：{r.get('error')}")
 
         with col6:
             if st.button("重新生成", key=f"regen_{i}"):
