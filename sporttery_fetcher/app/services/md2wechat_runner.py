@@ -89,7 +89,7 @@ def convert_and_upload(
             timeout=60,
         )
 
-        raw_output = result.stdout.strip() or result.stderr.strip()
+        raw_output = (result.stdout or "").strip() or (result.stderr or "").strip()
 
         # CLI returns JSON
         try:
