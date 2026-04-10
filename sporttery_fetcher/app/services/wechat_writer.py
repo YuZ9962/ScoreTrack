@@ -31,13 +31,25 @@ def _split_title_body(text: str, home: str, away: str) -> tuple[str, str]:
     return title, content
 
 
+def _s(v: Any, default: str = "") -> str:
+    """Convert a value to str, treating NaN / None / 'nan' as empty."""
+    if v is None:
+        return default
+    s = str(v).strip()
+    return default if not s or s.lower() == "nan" else s
+
+
 def _fallback_article(match: dict[str, Any], gemini: dict[str, Any]) -> str:
-    home = match.get("home_team", "主队")
-    away = match.get("away_team", "客队")
-    summary = gemini.get("gemini_summary") or gemini.get("gemini_raw_text") or "双方实力接近，临场因素将决定走势。"
-    rec = gemini.get("gemini_match_main_pick") or "主胜"
-    s1 = gemini.get("gemini_score_1") or "1:0"
-    s2 = gemini.get("gemini_score_2") or "2:1"
+    home = _s(match.get("home_team"), "主队")
+    away = _s(match.get("away_team"), "客队")
+    summary = (
+        _s(gemini.get("gemini_summary"))
+        or _s(gemini.get("gemini_raw_text"))
+        or "双方实力接近，临场因素将决定走势。"
+    )
+    rec = _s(gemini.get("gemini_match_main_pick")) or "主胜"
+    s1 = _s(gemini.get("gemini_score_1")) or "1:0"
+    s2 = _s(gemini.get("gemini_score_2")) or "2:1"
 
     return f"""【金条玩足球】{home}VS{away}：结构与节奏决定上限
 
