@@ -16,7 +16,7 @@ class InterfaceDetector:
 
     def detect(self, target_url: str) -> list[dict[str, Any]]:
         try:
-            from src.fetchers.playwright_utils import managed_playwright, stealth_browser_context
+            from tools.playwright_utils import managed_playwright, stealth_browser_context
         except Exception as exc:
             raise RuntimeError("请先安装 playwright 并执行 playwright install chromium") from exc
 

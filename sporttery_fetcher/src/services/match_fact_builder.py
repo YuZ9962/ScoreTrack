@@ -20,7 +20,6 @@ match_fact_builder.py
 """
 
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -125,8 +124,7 @@ def _facts_path(base_dir: Path | None = None) -> Path:
     return p
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from src.utils.shared_utils import now_iso as _now_iso
 
 
 def _ensure_mk(df: pd.DataFrame) -> pd.DataFrame:

@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timezone
 from typing import Any
 
 from openai import OpenAI
 
+from utils.common import now_iso as _now_iso
 from utils.wechat_prompt_builder import build_wechat_article_prompt
 
 DEFAULT_MODEL = "gpt-5.4"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _split_title_body(text: str, home: str, away: str) -> tuple[str, str]:

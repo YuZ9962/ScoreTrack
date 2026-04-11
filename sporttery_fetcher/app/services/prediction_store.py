@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from utils.common import csv_lock, sales_day_key
+from utils.data_paths import gemini_predictions_file
 
 
 def _try_rebuild_facts(base_dir: Path | None) -> None:
@@ -108,10 +109,7 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prediction_file(base_dir: Path | None = None) -> Path:
-    root = base_dir or Path(__file__).resolve().parents[2]
-    file_path = root / "data" / "predictions" / "gemini_predictions.csv"
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    return file_path
+    return gemini_predictions_file(base_dir)
 
 
 def load_predictions(base_dir: Path | None = None) -> pd.DataFrame:

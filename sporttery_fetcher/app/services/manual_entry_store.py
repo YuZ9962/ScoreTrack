@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,9 @@ import pandas as pd
 
 from services.prediction_store import save_prediction
 from src.services.result_cleaner import append_raw_results, load_clean_results
+from utils.common import now_iso as _now_iso
+from utils.data_paths import legacy_results_file
+from utils.data_paths import manual_matches_file as _manual_matches_file_path
 
 
 def _try_rebuild_facts(base_dir: Path | None) -> None:
@@ -68,24 +70,16 @@ class SaveResult:
     result_updated: bool
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _root(base_dir: Path | None = None) -> Path:
     return base_dir or Path(__file__).resolve().parents[2]
 
 
 def manual_matches_file(base_dir: Path | None = None) -> Path:
-    path = _root(base_dir) / "data" / "manual" / "history_matches.csv"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    return _manual_matches_file_path(base_dir)
 
 
 def _results_file(base_dir: Path | None = None) -> Path:
-    path = _root(base_dir) / "data" / "results" / "match_results.csv"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    return legacy_results_file(base_dir)
 
 
 def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -67,11 +66,9 @@ UNOPENED_KEYWORDS = (
     "推迟",
 )
 
+from src.utils.shared_utils import now_iso as _now_iso
+
 logger = logging.getLogger(__name__)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def result_paths(base_dir: Path | None = None) -> dict[str, Path]:

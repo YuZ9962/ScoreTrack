@@ -1,10 +1,34 @@
 from __future__ import annotations
 
+"""
+Data Layer Contract
+===================
+All read access from the app layer goes through this module (loader.py).
+Write access goes through the designated store module for each domain.
+
+File                                    Owner                   Schema ref
+----                                    -----                   ----------
+data/processed/{date}_matches.csv       src/utils/save.py       PROCESSED_MATCH_COLUMNS
+data/manual/history_matches.csv         manual_entry_store.py   MATCH_COLUMNS
+data/predictions/gemini_predictions.csv prediction_store.py     PREDICTION_COLUMNS
+data/predictions/chatgpt_*.csv          chatgpt_store.py        CHATGPT_COLUMNS
+data/results/raw_match_results.csv      result_cleaner.py       RAW_COLUMNS
+data/results/clean_match_results.csv    result_cleaner.py       RESULT_COLUMNS
+data/results/bad_match_results.csv      result_cleaner.py       BAD_COLUMNS
+data/facts/match_facts.csv              match_fact_builder.py   FACT_COLUMNS
+data/articles/wechat_articles.csv       article_store.py        ARTICLE_COLUMNS
+
+Trigger chain (write → rebuild):
+  Any store save  →  rebuild_match_facts()  →  data/facts/match_facts.csv
+  result_cleaner.append_raw_results()  →  rebuild_clean_results()  →  clean_match_results.csv
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 from services.chatgpt_store import load_chatgpt_predictions as _load_chatgpt_predictions
+from utils.data_paths import legacy_results_file, manual_matches_file, processed_dir
 from services.prediction_store import load_predictions as _load_predictions
 from src.services.result_cleaner import load_clean_results
 from services.transforms import ensure_issue_date_columns
@@ -22,8 +46,7 @@ class DataContext:
 
 
 def get_data_context(base_dir: Path | None = None) -> DataContext:
-    base = base_dir or Path(__file__).resolve().parents[2]
-    data_dir = base / "data" / "processed"
+    data_dir = processed_dir(base_dir)
     files = sorted(data_dir.glob("*_matches.csv"))
     return DataContext(data_dir=data_dir, files=files)
 
@@ -55,8 +78,7 @@ def load_matches_by_date(date_str: str, ctx: DataContext) -> pd.DataFrame:
 
 
 def _manual_match_file(base_dir: Path | None = None) -> Path:
-    root = base_dir or Path(__file__).resolve().parents[2]
-    return root / "data" / "manual" / "history_matches.csv"
+    return manual_matches_file(base_dir)
 
 
 def _concat_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -104,10 +126,7 @@ def load_all_matches(ctx: DataContext, base_dir: Path | None = None) -> pd.DataF
 
 
 def results_file(base_dir: Path | None = None) -> Path:
-    root = base_dir or Path(__file__).resolve().parents[2]
-    path = root / "data" / "results" / "match_results.csv"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    return legacy_results_file(base_dir)
 
 
 def load_results(base_dir: Path | None = None) -> pd.DataFrame:

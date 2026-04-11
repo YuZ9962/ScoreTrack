@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import os
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
+import bootstrap  # noqa: F401
 import streamlit as st
-
-APP_DIR = Path(__file__).resolve().parents[1]
-ROOT = APP_DIR.parent
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
+from bootstrap import ROOT
 
 from services.article_store import load_articles, save_article, update_wechat_upload_status
 from services.loader import get_data_context, load_gemini_predictions_by_date, load_matches_by_date

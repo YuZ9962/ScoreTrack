@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 
 from utils.common import csv_lock, sales_day_key
+from utils.data_paths import chatgpt_predictions_file
 
 
 def _try_rebuild_facts(base_dir: Path | None) -> None:
@@ -68,10 +69,7 @@ CHATGPT_COLUMNS = [
 
 
 def chatgpt_prediction_file(base_dir: Path | None = None) -> Path:
-    root = base_dir or Path(__file__).resolve().parents[2]
-    p = root / "data" / "predictions" / "chatgpt_predictions.csv"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return chatgpt_predictions_file(base_dir)
 
 
 def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:

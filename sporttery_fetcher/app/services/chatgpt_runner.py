@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any
 
 from openai import OpenAI
 
+from utils.common import now_iso as _now_iso
 
 DEFAULT_MODEL = "gpt-5.4"
 logger = logging.getLogger("chatgpt_runner")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _extract_output_text(response: Any) -> str:

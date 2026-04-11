@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-import sys
 from datetime import datetime
-from pathlib import Path
 
+import bootstrap  # noqa: F401
 import pandas as pd
 import streamlit as st
-
-APP_DIR = Path(__file__).resolve().parents[1]
-ROOT = APP_DIR.parent
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from bootstrap import ROOT
 
 from services.manual_entry_store import (
     load_existing_match,

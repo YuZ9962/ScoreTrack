@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 from config.settings import settings
 from src.fetchers.api_fetcher import APIFetcher
 from src.fetchers.html_fetcher import HTMLFetcher
-from src.fetchers.interface_detector import InterfaceDetector
+from tools.interface_detector import InterfaceDetector
 from src.utils.http import HTTPClient
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import settings
+from src.utils.schemas import PROCESSED_MATCH_COLUMNS
 
 
 def _ensure_parent(path: Path) -> None:
@@ -24,35 +25,11 @@ def save_json(records: list[dict[str, Any]], issue_date: str) -> Path:
 def save_csv(records: list[dict[str, Any]], issue_date: str) -> Path:
     output = settings.data_processed_dir / f"{issue_date}_matches.csv"
     _ensure_parent(output)
-    headers = [
-        "issue_date",
-        "match_no",
-        "league",
-        "home_team",
-        "away_team",
-        "kickoff_time",
-        "handicap",
-        "sell_status",
-        "spf_win",
-        "spf_draw",
-        "spf_lose",
-        "rqspf_win",
-        "rqspf_draw",
-        "rqspf_lose",
-        "play_spf",
-        "play_rqspf",
-        "play_score",
-        "play_goals",
-        "play_half_full",
-        "source_url",
-        "scrape_time",
-        "raw_id",
-    ]
     with output.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
+        writer = csv.DictWriter(f, fieldnames=PROCESSED_MATCH_COLUMNS)
         writer.writeheader()
         for row in records:
-            writer.writerow({h: row.get(h) for h in headers})
+            writer.writerow({h: row.get(h) for h in PROCESSED_MATCH_COLUMNS})
     return output
 
 

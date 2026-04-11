@@ -7,6 +7,8 @@ from typing import Any
 
 import pandas as pd
 
+from utils.data_paths import wechat_articles_file
+
 ARTICLE_COLUMNS = [
     "issue_date",
     "match_no",
@@ -27,10 +29,7 @@ ARTICLE_COLUMNS = [
 
 
 def article_csv_file(base_dir: Path | None = None) -> Path:
-    root = base_dir or Path(__file__).resolve().parents[2]
-    p = root / "data" / "articles" / "wechat_articles.csv"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return wechat_articles_file(base_dir)
 
 
 def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:

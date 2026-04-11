@@ -1,18 +1,9 @@
 from __future__ import annotations
 
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
+import bootstrap  # noqa: F401
 import pandas as pd
 import streamlit as st
-
-APP_DIR = Path(__file__).resolve().parents[1]
-ROOT = APP_DIR.parent
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from bootstrap import ROOT
 
 from components.data_controls import render_date_file_selector, render_fetch_section
 from services.chatgpt_parser import parse_chatgpt_output
@@ -26,6 +17,7 @@ from services.transforms import normalize_dataframe, sort_by_match_no
 from utils.chatgpt_prompt_builder import build_chatgpt_probability_prompt
 from utils.prompt_builder import build_simple_prediction_prompt
 from src.domain.match_identity import build_match_key
+from utils.common import now_iso as _now_iso
 
 STATUS_SUCCESS = "success"
 STATUS_FAILED = "failed"
@@ -35,11 +27,6 @@ STATUS_PENDING = "pending"
 SOURCE_AUTO = "auto_gemini"
 SOURCE_MANUAL_GEMINI = "manual_gemini"
 SOURCE_MANUAL_USER = "manual_user"
-
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 

@@ -6,3 +6,5 @@ logs/*.log
 data/raw/*.json
 data/raw/snapshots/*.html
 data/processed/*.csv
+.env.*
+!.env.example

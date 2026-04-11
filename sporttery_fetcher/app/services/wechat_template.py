@@ -153,6 +153,9 @@ def render_template(template_html: str, fields: dict[str, str]) -> str:
     #     保留文字内容，图片可在微信后台手动补充
     html = re.sub(r'<section[^>]*>\s*<section[^>]*>\s*<span[^>]*><img[^>]+></span>\s*</section>\s*</section>', '', html)
 
+    # 11. 压缩标签间空白，减少 content 字节数（微信 draft/add 有 ~20000 byte 限制）
+    html = re.sub(r'>\s+<', '><', html)
+
     return html
 
 

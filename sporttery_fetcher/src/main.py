@@ -141,7 +141,7 @@ def run(issue_date: str) -> dict[str, Any]:
     if not raw_records:
         detail = (
             "抓取失败：未获取到有效竞彩足球数据。\n"
-            "请优先运行：python -m src.fetchers.interface_detector\n"
+            "请优先运行：python -m tools.interface_detector\n"
             "并确认主页面是否可访问：https://www.sporttery.cn/jc/jsq/zqspf/index.html\n"
             "如需动态解析，请先执行：playwright install chromium"
         )

@@ -4,11 +4,13 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
+
+from utils.common import now_iso as _now_iso
+from utils.data_paths import wechat_token_cache_file
 
 logger = logging.getLogger("wechat_api")
 
@@ -21,18 +23,11 @@ MATERIAL_BATCHGET_URL = "https://api.weixin.qq.com/cgi-bin/material/batchget_mat
 
 
 def _token_cache_file(base_dir: Path | None = None) -> Path:
-    root = base_dir or Path(__file__).resolve().parents[2]
-    p = root / "data" / "articles" / "wechat_token_cache.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return wechat_token_cache_file(base_dir)
 
 
 def _now_ts() -> int:
     return int(time.time())
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _read_cache(path: Path) -> dict[str, Any]:
