@@ -75,19 +75,26 @@ def convert_and_upload(
         tmp_path = f.name
 
     # 自动获取封面：md2wechat 上传草稿时封面为必填项
-    # 优先级：调用方传入 → 按名搜索微信素材 → 微信素材第一张 URL → 本地默认封面图
+    # 优先级：调用方传入 → API查素材库 → 缓存的 media_id（token过期时降级） → 本地默认封面
     _default_cover_path = Path(__file__).resolve().parent.parent / "assets" / "default_cover.jpg"
     _cover_name = os.environ.get("WECHAT_DEFAULT_COVER_NAME", "test.jpg").strip()
     resolved_cover = cover_path
     if not resolved_cover:
         try:
-            from services.wechat_api import get_media_id_by_name, get_default_cover_url
+            from services.wechat_api import (
+                get_media_id_by_name, get_default_cover_url, get_cached_cover_media_id,
+            )
             if _cover_name:
                 media_id = get_media_id_by_name(_cover_name, base_dir)
                 if media_id:
-                    # 有 media_id 则用 Python API 路径（跳过重新上传）
-                    resolved_cover = f"__media_id__:{media_id}"
                     logger.info("md2wechat 使用素材库封面 name=%s media_id=%s...", _cover_name, media_id[:12])
+                else:
+                    # token 过期或 API 失败时，使用上次成功缓存的永久素材 media_id
+                    media_id = get_cached_cover_media_id(_cover_name, base_dir)
+                    if media_id:
+                        logger.info("md2wechat 使用缓存封面 media_id name=%s media_id=%s...", _cover_name, media_id[:12])
+                if media_id:
+                    resolved_cover = f"__media_id__:{media_id}"
             if not resolved_cover:
                 url = get_default_cover_url(base_dir) or None
                 if url:

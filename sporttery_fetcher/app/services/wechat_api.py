@@ -12,6 +12,9 @@ import requests
 from utils.common import now_iso as _now_iso
 from utils.data_paths import wechat_token_cache_file
 
+def _cover_media_id_cache_file(base_dir: Path | None = None) -> Path:
+    return wechat_token_cache_file(base_dir).parent / "wechat_cover_media_id.json"
+
 logger = logging.getLogger("wechat_api")
 
 TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/token"
@@ -230,8 +233,16 @@ def get_media_id_by_name(name: str, base_dir: Path | None = None) -> str:
             items = data.get("item", [])
             for item in items:
                 if item.get("name") == name:
-                    logger.info("找到素材 %s → media_id=%s", name, str(item.get("media_id", ""))[:12])
-                    return str(item.get("media_id", ""))
+                    media_id = str(item.get("media_id", ""))
+                    logger.info("找到素材 %s → media_id=%s", name, media_id[:12])
+                    # 永久素材 media_id 不变，持久化缓存供 token 失效时备用
+                    try:
+                        cache = _read_cache(_cover_media_id_cache_file(base_dir))
+                        cache[name] = media_id
+                        _write_cache(_cover_media_id_cache_file(base_dir), cache)
+                    except Exception:
+                        pass
+                    return media_id
             total = data.get("total_count", 0)
             offset += len(items)
             if not items or offset >= total:
@@ -241,6 +252,15 @@ def get_media_id_by_name(name: str, base_dir: Path | None = None) -> str:
             break
     logger.warning("未找到素材: %s", name)
     return ""
+
+
+def get_cached_cover_media_id(name: str, base_dir: Path | None = None) -> str:
+    """返回上次 API 查找成功时缓存的封面 media_id（永久素材 ID 不变，可跨 token 周期复用）。"""
+    try:
+        cache = _read_cache(_cover_media_id_cache_file(base_dir))
+        return str(cache.get(name, "") or "")
+    except Exception:
+        return ""
 
 
 def create_draft(
