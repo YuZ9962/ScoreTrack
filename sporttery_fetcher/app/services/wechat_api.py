@@ -189,6 +189,28 @@ def get_default_thumb_media_id(base_dir: Path | None = None) -> str:
     return ""
 
 
+def get_default_cover_url(base_dir: Path | None = None) -> str:
+    """从永久素材图片列表取第一张的可访问 URL，用作 md2wechat --cover 参数。"""
+    token_res = get_access_token(base_dir)
+    if not token_res.get("ok"):
+        return ""
+    token = token_res["access_token"]
+    try:
+        resp = requests.post(
+            MATERIAL_BATCHGET_URL,
+            params={"access_token": token},
+            json={"type": "image", "offset": 0, "count": 1},
+            timeout=15,
+        )
+        data = resp.json()
+        items = data.get("item", [])
+        if items:
+            return str(items[0].get("url", "") or "")
+    except Exception:
+        logger.exception("获取默认封面 URL 失败")
+    return ""
+
+
 def create_draft(
     *,
     title: str,

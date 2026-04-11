@@ -9,11 +9,14 @@ Supported styles: academic_gray | festival | tech | announcement
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 STYLE_LABELS: dict[str, str] = {
     "academic_gray": "学术灰（默认）",
@@ -66,6 +69,19 @@ def convert_and_upload(
         f.write(markdown_text)
         tmp_path = f.name
 
+    # 自动获取封面：md2wechat 上传草稿时封面为必填项
+    resolved_cover = cover_path
+    if not resolved_cover:
+        try:
+            from services.wechat_api import get_default_cover_url
+            resolved_cover = get_default_cover_url(base_dir) or None
+            if resolved_cover:
+                logger.debug("md2wechat 自动获取封面 URL: %s", resolved_cover)
+            else:
+                logger.warning("md2wechat 未能获取封面 URL，上传可能失败")
+        except Exception:
+            logger.debug("获取封面 URL 失败，跳过", exc_info=True)
+
     try:
         cmd = [
             "md2wechat",
@@ -77,8 +93,8 @@ def convert_and_upload(
             cmd += ["--author", author[:16]]
         if summary:
             cmd += ["--summary", summary[:120]]
-        if cover_path:
-            cmd += ["--cover", cover_path]
+        if resolved_cover:
+            cmd += ["--cover", resolved_cover]
 
         result = subprocess.run(
             cmd,

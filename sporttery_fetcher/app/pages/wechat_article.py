@@ -4,14 +4,15 @@ import os
 from datetime import datetime, timezone
 
 import bootstrap  # noqa: F401
+import pandas as pd
 import streamlit as st
 from bootstrap import ROOT
 
-from services.article_store import load_articles, save_article, update_wechat_upload_status
+from services.article_store import article_csv_file, load_articles, save_article, update_wechat_upload_status
+from services.chatgpt_store import load_chatgpt_predictions
 from services.loader import get_data_context, load_gemini_predictions_by_date, load_matches_by_date
+from services.md2wechat_runner import DEFAULT_STYLE, STYLE_LABELS, convert_and_upload, is_available
 from services.transforms import normalize_dataframe
-from services.md2wechat_service import markdown_to_wechat_html
-from services.md2wechat_runner import STYLE_LABELS, DEFAULT_STYLE, convert_and_upload, is_available
 from services.wechat_api import create_draft, has_wechat_config, list_drafts
 from services.wechat_template import build_draft_from_template
 from services.wechat_writer import generate_wechat_article
@@ -28,6 +29,9 @@ if not options:
 selected_date = st.selectbox("日期", options=options, index=len(options) - 1)
 matches_df = normalize_dataframe(load_matches_by_date(selected_date, ctx))
 gemini_df = load_gemini_predictions_by_date(selected_date, ROOT)
+chatgpt_df = load_chatgpt_predictions(ROOT)
+if not chatgpt_df.empty and "issue_date" in chatgpt_df.columns:
+    chatgpt_df = chatgpt_df[chatgpt_df["issue_date"].astype(str) == str(selected_date)].copy()
 
 if matches_df.empty:
     st.info("当日无比赛")
@@ -35,91 +39,224 @@ if matches_df.empty:
 
 matches_df = matches_df.copy()
 matches_df["_match_label"] = matches_df.apply(
-    lambda r: f"{r.get('match_no', '-') } | {r.get('league', '-') } | {r.get('home_team', '-') } vs {r.get('away_team', '-') } | {r.get('kickoff_time', '-')}",
+    lambda r: (
+        f"{r.get('match_no', '-')} | {r.get('league', '-')} | "
+        f"{r.get('home_team', '-')} vs {r.get('away_team', '-')} | {r.get('kickoff_time', '-')}"
+    ),
     axis=1,
 )
+_NONE = "（不选）"
+label_options = [_NONE] + matches_df["_match_label"].tolist()
 
-selected_labels = st.multiselect(
-    "选择 1~3 场比赛",
-    options=matches_df["_match_label"].tolist(),
-    default=[],
-)
 
-if len(selected_labels) > 3:
-    st.error("最多只能选择 3 场比赛，请减少选择。")
-    st.stop()
+# ── 工具函数 ──────────────────────────────────────────────────────────────────
 
-selected_matches = matches_df[matches_df["_match_label"].isin(selected_labels)].copy()
-st.markdown("### 选中比赛预览")
-if selected_matches.empty:
-    st.caption("未选择比赛")
-else:
-    st.dataframe(
-        selected_matches[["match_no", "league", "home_team", "away_team", "kickoff_time", "handicap"]],
-        use_container_width=True,
-        hide_index=True,
-    )
+def _safe(v) -> str:
+    s = str(v or "").strip()
+    return "" if s in ("nan", "None", "none") else s
 
-match_inputs: list[tuple[dict, dict]] = []
 
-st.markdown("### Gemini 素材检查")
-for _, row in selected_matches.iterrows():
-    key = str(row.get("raw_id", "") or "").strip()
-    if key and (not gemini_df.empty) and "raw_id" in gemini_df.columns:
+def _find_gemini(row_dict: dict) -> dict | None:
+    if gemini_df.empty:
+        return None
+    key = _safe(row_dict.get("raw_id"))
+    if key and "raw_id" in gemini_df.columns:
         g = gemini_df[gemini_df["raw_id"].astype(str) == key].tail(1)
     else:
         g = gemini_df[
-            (gemini_df["match_no"].astype(str) == str(row.get("match_no", "")))
-            & (gemini_df["home_team"].astype(str) == str(row.get("home_team", "")))
-            & (gemini_df["away_team"].astype(str) == str(row.get("away_team", "")))
+            (gemini_df["match_no"].astype(str) == str(row_dict.get("match_no", "")))
+            & (gemini_df["home_team"].astype(str) == str(row_dict.get("home_team", "")))
+            & (gemini_df["away_team"].astype(str) == str(row_dict.get("away_team", "")))
         ].tail(1)
+    return g.iloc[-1].to_dict() if not g.empty else None
 
-    match_dict = row.to_dict()
-    if g.empty:
-        st.warning(f"{row.get('match_no')} {row.get('home_team')} vs {row.get('away_team')}：未找到 Gemini 分析，可手动补录摘要")
-        txt = st.text_area(
-            f"手动补录摘要：{row.get('match_no')} {row.get('home_team')} vs {row.get('away_team')}",
+
+def _find_chatgpt(row_dict: dict) -> dict | None:
+    if chatgpt_df.empty:
+        return None
+    key = _safe(row_dict.get("raw_id"))
+    if key and "raw_id" in chatgpt_df.columns:
+        c = chatgpt_df[chatgpt_df["raw_id"].astype(str) == key].tail(1)
+    else:
+        c = chatgpt_df[
+            (chatgpt_df["match_no"].astype(str) == str(row_dict.get("match_no", "")))
+            & (chatgpt_df["home_team"].astype(str) == str(row_dict.get("home_team", "")))
+            & (chatgpt_df["away_team"].astype(str) == str(row_dict.get("away_team", "")))
+        ].tail(1)
+    return c.iloc[-1].to_dict() if not c.empty else None
+
+
+def _show_predictions(match_row: dict) -> None:
+    g = _find_gemini(match_row)
+    c = _find_chatgpt(match_row)
+    col_g, col_c = st.columns(2)
+    with col_g:
+        st.markdown("**Gemini**")
+        if g:
+            picks = " / ".join(filter(None, [_safe(g.get("gemini_match_main_pick")), _safe(g.get("gemini_match_secondary_pick"))]))
+            hdp = " / ".join(filter(None, [_safe(g.get("gemini_handicap_main_pick")), _safe(g.get("gemini_handicap_secondary_pick"))]))
+            scores = " / ".join(filter(None, [_safe(g.get("gemini_score_1")), _safe(g.get("gemini_score_2"))]))
+            if picks:
+                st.caption(f"胜平负：{picks}")
+            if hdp:
+                st.caption(f"让球：{hdp}")
+            if scores:
+                st.caption(f"比分：{scores}")
+            summary = _safe(g.get("gemini_summary"))
+            if summary:
+                st.caption(summary[:200])
+        else:
+            st.caption("暂无 Gemini 数据")
+    with col_c:
+        st.markdown("**ChatGPT**")
+        if c:
+            home = match_row.get("home_team", "主队")
+            away = match_row.get("away_team", "客队")
+            wp = _safe(c.get("chatgpt_home_win_prob"))
+            dp = _safe(c.get("chatgpt_draw_prob"))
+            lp = _safe(c.get("chatgpt_away_win_prob"))
+            if any([wp, dp, lp]):
+                st.caption(f"概率：{home}胜 {wp} | 平 {dp} | {away}胜 {lp}")
+            hw = _safe(c.get("chatgpt_handicap_win_prob"))
+            hd = _safe(c.get("chatgpt_handicap_draw_prob"))
+            hl = _safe(c.get("chatgpt_handicap_lose_prob"))
+            if any([hw, hd, hl]):
+                st.caption(f"让球概率：赢 {hw} | 走 {hd} | 负 {hl}")
+            picks = " / ".join(filter(None, [_safe(c.get("chatgpt_match_main_pick")), _safe(c.get("chatgpt_match_secondary_pick"))]))
+            if picks:
+                st.caption(f"推荐：{picks}")
+            top = _safe(c.get("chatgpt_top_direction"))
+            if top:
+                st.caption(f"方向：{top}")
+            summary = _safe(c.get("chatgpt_summary"))
+            if summary:
+                st.caption(summary[:200])
+        else:
+            st.caption("暂无 ChatGPT 数据")
+
+
+def _gemini_dict_from_row(g: dict | None) -> dict:
+    keys = [
+        "gemini_raw_text", "gemini_summary",
+        "gemini_match_main_pick", "gemini_match_secondary_pick",
+        "gemini_handicap_main_pick", "gemini_handicap_secondary_pick",
+        "gemini_score_1", "gemini_score_2",
+    ]
+    if g:
+        return {k: g.get(k) for k in keys}
+    return {k: "" for k in keys}
+
+
+# ── 三个独立下拉菜单 ──────────────────────────────────────────────────────────
+st.markdown("### 选择比赛（最多 3 场）")
+dc1, dc2, dc3 = st.columns(3)
+with dc1:
+    sel1 = st.selectbox("比赛 1", options=label_options, key="sel_match_1")
+with dc2:
+    sel2 = st.selectbox("比赛 2", options=label_options, key="sel_match_2")
+with dc3:
+    sel3 = st.selectbox("比赛 3", options=label_options, key="sel_match_3")
+
+# 去重、保序
+_seen: set[str] = set()
+selected_labels: list[str] = []
+for _lbl in [sel1, sel2, sel3]:
+    if _lbl != _NONE and _lbl not in _seen:
+        selected_labels.append(_lbl)
+        _seen.add(_lbl)
+
+# ── 预测信息展示 ───────────────────────────────────────────────────────────────
+if selected_labels:
+    st.markdown("#### 预测信息")
+    pred_cols = st.columns(len(selected_labels))
+    for _idx, _lbl in enumerate(selected_labels):
+        _mrow = matches_df[matches_df["_match_label"] == _lbl].iloc[0].to_dict()
+        with pred_cols[_idx]:
+            st.markdown(f"**{_mrow.get('match_no')} {_mrow.get('home_team')} vs {_mrow.get('away_team')}**")
+            _show_predictions(_mrow)
+
+# ── 自动从 CSV 加载已有文章（选择变化时触发）──────────────────────────────────
+_sel_key = f"{selected_date}|{'|'.join(selected_labels)}"
+if st.session_state.get("_wechat_sel_key") != _sel_key:
+    st.session_state["_wechat_sel_key"] = _sel_key
+    _csv_arts = load_articles(ROOT)
+    _preloaded: list[dict] = []
+    for _lbl in selected_labels:
+        _mrow = matches_df[matches_df["_match_label"] == _lbl].iloc[0].to_dict()
+        _existing: pd.DataFrame = pd.DataFrame()
+        if not _csv_arts.empty:
+            _dm = _csv_arts["issue_date"].astype(str) == str(selected_date)
+            _mm = (
+                (_csv_arts["home_team"].astype(str) == str(_mrow.get("home_team", "")))
+                & (_csv_arts["away_team"].astype(str) == str(_mrow.get("away_team", "")))
+            )
+            _existing = _csv_arts[_dm & _mm]
+        if not _existing.empty:
+            _art = _existing.iloc[-1].to_dict()
+            _preloaded.append({
+                **_art,
+                "source_match": _mrow,
+                "source_gemini": _gemini_dict_from_row(_find_gemini(_mrow)),
+                "csv_path": str(article_csv_file(ROOT)),
+                "md_path": str(
+                    ROOT / "data" / "articles" /
+                    f"{selected_date}_{str(_mrow.get('home_team','')).replace('/','-')}_vs_{str(_mrow.get('away_team','')).replace('/','-')}.md"
+                ),
+            })
+    st.session_state["wechat_articles"] = _preloaded
+
+# ── 手动补录 Gemini 素材（无 Gemini 数据的场次）────────────────────────────────
+if selected_labels:
+    st.markdown("#### Gemini 素材检查")
+for _lbl in selected_labels:
+    _mrow = matches_df[matches_df["_match_label"] == _lbl].iloc[0].to_dict()
+    if _find_gemini(_mrow) is None:
+        st.warning(
+            f"{_mrow.get('match_no')} {_mrow.get('home_team')} vs {_mrow.get('away_team')}："
+            "未找到 Gemini 分析，可手动补录摘要"
+        )
+        st.text_area(
+            f"手动补录：{_mrow.get('match_no')} {_mrow.get('home_team')} vs {_mrow.get('away_team')}",
             value="",
             height=90,
-            key=f"manual_{row.get('match_no')}_{row.get('home_team')}_{row.get('away_team')}",
+            key=f"manual_{_mrow.get('match_no')}_{_mrow.get('home_team')}_{_mrow.get('away_team')}",
         )
-        gemini_dict = {
-            "gemini_raw_text": txt,
-            "gemini_summary": txt,
-            "gemini_match_main_pick": "",
-            "gemini_match_secondary_pick": "",
-            "gemini_handicap_main_pick": "",
-            "gemini_handicap_secondary_pick": "",
-            "gemini_score_1": "",
-            "gemini_score_2": "",
+
+# ── 构建 match_inputs（用于生成按钮）────────────────────────────────────────
+match_inputs: list[tuple[dict, dict]] = []
+_already_generated = {
+    (str(a.get("home_team", "")), str(a.get("away_team", "")))
+    for a in st.session_state.get("wechat_articles", [])
+}
+for _lbl in selected_labels:
+    _mrow = matches_df[matches_df["_match_label"] == _lbl].iloc[0].to_dict()
+    _g = _find_gemini(_mrow)
+    _manual_key = f"manual_{_mrow.get('match_no')}_{_mrow.get('home_team')}_{_mrow.get('away_team')}"
+    _manual_txt = st.session_state.get(_manual_key, "")
+    if _g is None and _manual_txt:
+        _g = {
+            "gemini_raw_text": _manual_txt, "gemini_summary": _manual_txt,
+            "gemini_match_main_pick": "", "gemini_match_secondary_pick": "",
+            "gemini_handicap_main_pick": "", "gemini_handicap_secondary_pick": "",
+            "gemini_score_1": "", "gemini_score_2": "",
         }
+    match_inputs.append((_mrow, _gemini_dict_from_row(_g)))
+
+# ── 生成按钮 ──────────────────────────────────────────────────────────────────
+_need_generate = [
+    (md, gd) for md, gd in match_inputs
+    if (str(md.get("home_team", "")), str(md.get("away_team", ""))) not in _already_generated
+]
+_btn_label = "一键生成公众号文案"
+if _need_generate and _already_generated:
+    _btn_label = f"生成剩余 {len(_need_generate)} 篇文章"
+
+if st.button(_btn_label, type="primary", disabled=not selected_labels):
+    if not selected_labels:
+        st.warning("请先选择至少 1 场比赛")
     else:
-        gemini_row = g.iloc[-1].to_dict()
-        gemini_dict = {
-            "gemini_raw_text": gemini_row.get("gemini_raw_text"),
-            "gemini_summary": gemini_row.get("gemini_summary"),
-            "gemini_match_main_pick": gemini_row.get("gemini_match_main_pick"),
-            "gemini_match_secondary_pick": gemini_row.get("gemini_match_secondary_pick"),
-            "gemini_handicap_main_pick": gemini_row.get("gemini_handicap_main_pick"),
-            "gemini_handicap_secondary_pick": gemini_row.get("gemini_handicap_secondary_pick"),
-            "gemini_score_1": gemini_row.get("gemini_score_1"),
-            "gemini_score_2": gemini_row.get("gemini_score_2"),
-        }
-        st.success(f"{row.get('match_no')} {row.get('home_team')} vs {row.get('away_team')}：已找到 Gemini 分析")
-
-    match_inputs.append((match_dict, gemini_dict))
-
-if "wechat_articles" not in st.session_state:
-    st.session_state["wechat_articles"] = []
-
-if st.button("一键生成公众号文案", type="primary"):
-    if len(selected_matches) == 0:
-        st.warning("请先选择 1~3 场比赛")
-    elif len(selected_matches) > 3:
-        st.warning("最多 3 场")
-    else:
-        generated = []
-        for match_dict, gemini_dict in match_inputs:
+        _to_generate = _need_generate if _need_generate else match_inputs
+        for match_dict, gemini_dict in _to_generate:
             result = generate_wechat_article(match_dict, gemini_dict)
             if not result.get("ok"):
                 st.error(f"生成失败：{match_dict.get('home_team')} vs {match_dict.get('away_team')}")
@@ -143,18 +280,29 @@ if st.button("一键生成公众号文案", type="primary"):
                 "wechat_error_message": None,
             }
             csv_path, md_path = save_article(record, ROOT)
-            generated.append(
-                {
-                    **record,
-                    "prompt": result.get("prompt", ""),
-                    "source_gemini": gemini_dict,
-                    "source_match": match_dict,
-                    "csv_path": str(csv_path),
-                    "md_path": str(md_path),
-                }
-            )
+            new_entry = {
+                **record,
+                "prompt": result.get("prompt", ""),
+                "source_gemini": gemini_dict,
+                "source_match": match_dict,
+                "csv_path": str(csv_path),
+                "md_path": str(md_path),
+            }
+            # 替换 session 中同场次旧记录（如有）
+            arts = st.session_state.get("wechat_articles", [])
+            arts = [
+                a for a in arts
+                if not (
+                    str(a.get("home_team")) == str(match_dict.get("home_team"))
+                    and str(a.get("away_team")) == str(match_dict.get("away_team"))
+                )
+            ]
+            arts.append(new_entry)
+            st.session_state["wechat_articles"] = arts
 
-        st.session_state["wechat_articles"] = generated
+        # 刷新选择键，避免触发 CSV 重载覆盖刚生成的内容
+        st.session_state["_wechat_sel_key"] = _sel_key
+        st.rerun()
 
 st.markdown("---")
 st.markdown("### 微信公众号上传状态")
@@ -168,7 +316,6 @@ if st.button("批量上传今天生成的全部文章到草稿", disabled=not ha
     if not enable_upload:
         st.warning("WECHAT_ENABLE_DRAFT_UPLOAD=false，已禁用上传")
     else:
-        # 合并 session 文章 + CSV 中当天未上传的文章
         csv_articles = load_articles(ROOT)
         pending_from_csv = []
         if not csv_articles.empty:
@@ -178,7 +325,6 @@ if st.button("批量上传今天生成的全部文章到草稿", disabled=not ha
             pending_from_csv = pending_rows.to_dict("records")
 
         session_articles = st.session_state.get("wechat_articles", [])
-        # 用 (match_no, home_team, away_team) 去重，session 优先（含最新正文）
         seen = {(a.get("match_no"), a.get("home_team"), a.get("away_team")) for a in session_articles}
         for row in pending_from_csv:
             key = (row.get("match_no"), row.get("home_team"), row.get("away_team"))
@@ -247,7 +393,6 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
         if article.get("wechat_error_message"):
             st.error(f"上传失败：{article.get('wechat_error_message')}")
 
-        # md2wechat 主题选择（每篇独立）
         _md2w_style_key = f"md2w_style_{i}"
         if _md2w_style_key not in st.session_state:
             st.session_state[_md2w_style_key] = DEFAULT_STYLE
@@ -434,14 +579,16 @@ for i, article in enumerate(st.session_state.get("wechat_articles", []), start=1
                 with st.spinner("重新生成中..."):
                     new_result = generate_wechat_article(match_d, gemini_d)
                 if new_result.get("ok"):
-                    articles = st.session_state["wechat_articles"]
-                    articles[i - 1]["article_title"] = new_result.get("article_title", "")
-                    articles[i - 1]["article_body"] = new_result.get("article_body", "")
-                    articles[i - 1]["article_fields"] = new_result.get("article_fields") or {}
-                    articles[i - 1]["source_model"] = new_result.get("source_model", "")
-                    articles[i - 1]["wechat_upload_status"] = "未上传"
-                    articles[i - 1]["wechat_draft_id"] = None
-                    save_article(articles[i - 1], ROOT)
+                    arts = st.session_state["wechat_articles"]
+                    arts[i - 1]["article_title"] = new_result.get("article_title", "")
+                    arts[i - 1]["article_body"] = new_result.get("article_body", "")
+                    arts[i - 1]["article_fields"] = new_result.get("article_fields") or {}
+                    arts[i - 1]["source_model"] = new_result.get("source_model", "")
+                    arts[i - 1]["wechat_upload_status"] = "未上传"
+                    arts[i - 1]["wechat_draft_id"] = None
+                    save_article(arts[i - 1], ROOT)
+                    # 更新选择键以防止 CSV 重载覆盖刚生成的内容
+                    st.session_state["_wechat_sel_key"] = _sel_key
                     st.success("重新生成成功")
                     st.rerun()
                 else:
