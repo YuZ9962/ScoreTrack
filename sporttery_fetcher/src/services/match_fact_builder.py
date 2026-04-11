@@ -166,6 +166,11 @@ def _ensure_col(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df
 
 
+_PICK_ALIASES: dict[str, str] = {
+    "平局": "平",
+}
+
+
 def _normalize_text(v: Any) -> str:
     if v is None:
         return ""
@@ -174,7 +179,8 @@ def _normalize_text(v: Any) -> str:
             return ""
     except Exception:
         pass
-    return str(v).strip()
+    s = str(v).strip()
+    return _PICK_ALIASES.get(s, s)
 
 
 def _judge_hit(real_result: Any, main_pick: Any, secondary_pick: Any) -> str:
