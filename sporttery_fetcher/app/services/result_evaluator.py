@@ -21,8 +21,14 @@ class MatchStats:
             self.skip_samples = []
 
 
+_PICK_ALIASES: dict[str, str] = {
+    "平局": "平",
+}
+
+
 def _normalize_pick(value: object) -> str:
-    return str(value or "").strip()
+    s = str(value or "").strip()
+    return _PICK_ALIASES.get(s, s)
 
 
 def _has_secondary_pick(value: object) -> bool:
