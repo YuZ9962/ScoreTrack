@@ -127,7 +127,7 @@ def upload_image_material(file_path: str, base_dir: Path | None = None) -> dict[
 # 官方文档所标注的"32字/16字"适用于认证服务号，个人号更严
 _TITLE_MAX_BYTES = 30   # ≈ 10 个汉字
 _AUTHOR_MAX_BYTES = 6   # ≈ 2 个汉字
-_DIGEST_MAX_BYTES = 120  # 40 汉字 × 3 bytes，个人订阅号实测上限
+_DIGEST_MAX_BYTES = 64   # ≈ 21 个汉字；45004 错误实测后下调（原 120 超限）
 
 
 def _truncate_bytes(s: str, max_bytes: int) -> str:
@@ -148,9 +148,6 @@ def _build_article_payload(
 ) -> dict[str, Any]:
     safe_title = _truncate_bytes(title, _TITLE_MAX_BYTES)
     safe_author = _truncate_bytes(author, _AUTHOR_MAX_BYTES)
-    # 若标题被截断，把完整标题存入 digest 供微信后台显示
-    if not digest and len(safe_title) < len(title):
-        digest = title
     safe_digest = _truncate_bytes(digest, _DIGEST_MAX_BYTES)
     article = {
         "title": safe_title,
@@ -208,6 +205,41 @@ def get_default_cover_url(base_dir: Path | None = None) -> str:
             return str(items[0].get("url", "") or "")
     except Exception:
         logger.exception("获取默认封面 URL 失败")
+    return ""
+
+
+def get_media_id_by_name(name: str, base_dir: Path | None = None) -> str:
+    """按文件名搜索永久素材图片，返回第一个匹配项的 media_id。"""
+    token_res = get_access_token(base_dir)
+    if not token_res.get("ok"):
+        return ""
+    token = token_res["access_token"]
+    offset, count = 0, 20
+    while True:
+        try:
+            resp = requests.post(
+                MATERIAL_BATCHGET_URL,
+                params={"access_token": token},
+                json={"type": "image", "offset": offset, "count": count},
+                timeout=15,
+            )
+            data = resp.json()
+            if data.get("errcode"):
+                logger.warning("get_media_id_by_name API 错误 %s: %s", data.get("errcode"), data.get("errmsg"))
+                return ""
+            items = data.get("item", [])
+            for item in items:
+                if item.get("name") == name:
+                    logger.info("找到素材 %s → media_id=%s", name, str(item.get("media_id", ""))[:12])
+                    return str(item.get("media_id", ""))
+            total = data.get("total_count", 0)
+            offset += len(items)
+            if not items or offset >= total:
+                break
+        except Exception:
+            logger.exception("搜索素材 %s 失败", name)
+            break
+    logger.warning("未找到素材: %s", name)
     return ""
 
 
